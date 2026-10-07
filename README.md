@@ -9,8 +9,7 @@ Raw data are not included in this repository; they are available from the origin
 - Columbia urine mass spectrometry: See the supplementary tables of this citation.
 - Mouse urine proteomics: see the details in the our manuscript.
 
-Place input files in `data/`. Participant exclusion lists are read from `data/excluded_ids.csv`,
-which is not distributed; exclusion rules are described in the Methods.
+Place input files in `data/`. Participant exclusion lists are read from `data/excluded_ids.csv`; exclusion rules are described in the Methods.
 
 ## Scripts
 Run scripts in numeric order. * = added in revision.
