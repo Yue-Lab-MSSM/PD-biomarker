@@ -51,9 +51,7 @@ filtered_new_data <- new_data[, -c(1:31)]
 
 colnames(filtered_new_data) <- sapply(strsplit(colnames(filtered_new_data), "_"), function(x) paste(x[3:length(x)], collapse = "_"))
 
-# View the updated dataframe
 head(filtered_new_data)
-
 
 filtered_new_data <- t(filtered_new_data)
 
@@ -74,7 +72,7 @@ library(limma)
 
 # Create design matrix for the condition of interest   Control vs Treatment
 sample_data$GROUP <- factor(sample_data$GROUP, levels = c("HC", "PD_LRRK2"))
-#sample_data$GROUP <- factor(sample_data$GROUP)
+
 design <- model.matrix(~ GROUP + AGE + SexM1.F0, data=sample_data)
 
 # Fit the linear model to the log2-transformed data
@@ -131,7 +129,6 @@ EnhancedVolcano(results, lab = row.names(results), x = 'logFC', y = 'adj.P.Val',
 dev.off() 
 
 
-# File paths for the three lists
 Total_genes <- DEPs
 Total_genes$genesid <- sub("_.*$", "", rownames(DEPs))
 
@@ -159,7 +156,6 @@ gene_entrez <- bitr(Down_genes, fromType = "SYMBOL", #change to Up_genes for enr
 # Find the genes that failed to map
 failed_genes <- setdiff(Down_genes, gene_entrez$SYMBOL)
 
-# Print the failed genes
 print("Failed to map genes:")
 print(failed_genes)
 
@@ -205,15 +201,12 @@ strip_theme <- theme(
   panel.background = element_blank(),
   panel.grid       = element_blank(),
   
-  # y‐axis labels (the GO terms)
   axis.text.y      = element_text(size = 14),  
   axis.title.y     = element_text(size = 16),   
   
-  # legend (color/size scales, if shown)
   legend.title     = element_text(size = 14),
   legend.text      = element_text(size = 12),
   
-  # remove x‐axis entirely
   axis.title.x     = element_blank(),
   axis.text.x      = element_blank(),
   axis.ticks.x     = element_blank()
@@ -222,14 +215,12 @@ strip_theme <- theme(
 for (ont in names(ego_list)) {
   ego_obj <- ego_list[[ont]]
   
-  # 3. write out the table
   write.csv(
     as.data.frame(ego_obj),
     file = sprintf("The_GO_%s_of_enriched_proteins_in_DOWN_LRRK2 PD_(155)_vs_HC(184).csv", ont),
     row.names = FALSE
   )
   
-  # 4. make a dotplot with larger text  
   p <- dotplot(
     ego_obj,
     showCategory = 10,
@@ -240,7 +231,6 @@ for (ont in names(ego_list)) {
     scale_x_continuous(NULL, breaks = NULL) +
     strip_theme
   
-  # 5. save as PDF
   pdf(
     sprintf("GO_%s_vertical_dotplot_DOWN_LRRK2 PD_(155)_vs_HC(184).pdf", ont),
     width  = 5,
