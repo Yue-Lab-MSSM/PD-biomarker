@@ -24,9 +24,10 @@
 #   14. Module membership vs. peptide significance
 #   15. GO TERM and KEGG analysis
 #
-# Input : ./ppmi_project_190.csv
-#           (first 31 columns = phenotypes; remaining columns = log2 MS
-#            abundances)
+# Input : ./PPMI_Project_190_log2_translated_imputated_data.csv
+#           (PATNO, 30 phenotype columns, then protein-group abundances that were
+#            log2-transformed, filtered (detected in >70% of samples) and
+#            imputed from a normal distribution in Perseus; see Methods)
 # Output: results/WGCNA/
 # =============================================================================
 
@@ -45,7 +46,7 @@ setwd(".")
 #
 #=====================================================================================
 
-protein_matrix <- read.csv("./ppmi_project_190.csv.csv", header = T, row.names = 1)
+protein_matrix <- read.csv("./PPMI_Project_190_log2_translated_imputated_data.csv", header = T, row.names = 1)
 head(protein_matrix, n=20)
 protein_matrix <- protein_matrix[protein_matrix$EVENT_ID == "BL", ]
 row.names(protein_matrix) <- protein_matrix$PATNO
