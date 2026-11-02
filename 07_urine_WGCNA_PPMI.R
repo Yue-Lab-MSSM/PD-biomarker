@@ -1,5 +1,5 @@
 # =============================================================================
-# 10_urine_WGCNA_PPMI.R
+# 07_urine_WGCNA_PPMI.R
 # Weighted gene co-expression network analysis (WGCNA) of urine proteins
 # (PPMI Project 190, MS)
 #
