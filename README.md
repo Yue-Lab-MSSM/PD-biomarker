@@ -34,6 +34,7 @@ Run scripts in numeric order. * = added in revision.
 | 07_urine_WGCNA_PPMI.R | Co-expression network, module–trait correlation, module membership|
 | 08_ML_PPMI_to_LCC.R | Elastic-net model trained on PPMI, validated on LCC; label-permutation test (10,000)|
 | 09_mouse_urine_DAP.R | Lrrk2 G2019S vs WT mice (limma); GO enrichment|
+| 10_mouse_urine_WGCNA.R | Co-expression network, module–trait correlation, module membership|
 
 ## Software
 R [4.5.0]. Main packages: limma, WGCNA, glmnet, pROC, lme4, lmerTest, clusterProfiler,
