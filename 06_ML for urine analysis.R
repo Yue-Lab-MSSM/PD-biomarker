@@ -19,8 +19,8 @@ set.seed(23)
 # =========================
 # 1. FILE PATHS
 # =========================
-ppmi_file <- "../All_modified_log_imputation.csv"
-lcc_file  <- "../The urine proteomic data of LCC.csv"
+ppmi_file <- "./PPMI_Project_190_log2_translated_imputated_data.csv"
+lcc_file  <- "./The urine proteomic data of LCC.csv"
 
 outdir <- "./"
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
