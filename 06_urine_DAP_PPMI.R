@@ -1,5 +1,5 @@
 # =============================================================================
-# 09_urine_DAP_PPMI.R
+# 06_urine_DAP_PPMI.R
 # Differential abundance and GO/KEGG enrichment of urine proteins
 # (PPMI Project 190, mass spectrometry, baseline visit) for all comparisons
 # in the manuscript
