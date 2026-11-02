@@ -8,289 +8,686 @@
 #
 # Steps
 #   1. Load data, define groups (HC, LRRK2, GBA, sPD)
-#   2. Quality control: remove poor proteins/samples and outlier samples
+#   2. Load traits data and Quality control: remove poor proteins/samples and outlier samples
 #      (hierarchical clustering of samples, tree cut at height 40)
 #   3. Choose the soft-thresholding power (scale-free topology)
-#   4. Build a signed network and detect modules (blockwiseModules)
-#   5. Module-trait correlations (module eigengene vs. group indicator)
-#   6. Protein-level output: module, gene significance (GS), module membership (MM)
-#   7. Plots: dendrogram, module-trait heatmap, MM vs. GS scatter plots
-#   8. Hub-protein networks for Cytoscape
-#   9. GO/KEGG enrichment of selected module proteins
+#   4. WGCNA construction and detect modules (blockwiseModules)
+#   5. Clustering dendrograms for peptides
+#   6. Modules analysis
+#   7. Peptide significance caculation
+#   8. Module-trait relationships
+#   9. Correlated eigenpeptide in modules associated with traits
+#   10. WGCNA results Output
+#   11. Network heatmap plot visulization
+#   12. Exporting Network to external visualization software
+#   13. Exporting top hub Network to external visualization software (cytoscope)
+#   14. Module membership vs. peptide significance
+#   15. GO TERM and KEGG analysis
 #
-# Input : data/Working_file_ppmi_project_151 with phenotypes7.12.25.csv
+# Input : ./ppmi_project_151.csv
 #           (first 31 columns = phenotypes; remaining columns = log2 SomaScan
 #            abundances, already normalized by the SomaScan pipeline)
 # Output: results/WGCNA/
 # =============================================================================
 
+
 library(WGCNA)
-library(ggplot2)
-library(clusterProfiler)
-library(org.Hs.eg.db)
-library(AnnotationDbi)
-options(stringsAsFactors = FALSE)
-allowWGCNAThreads()
+library(DESeq2)
+library(GEOquery)
+library(tidyverse)
+library(gridExtra)
 
-## ---- Settings ---------------------------------------------------------------
+allowWGCNAThreads()          # allow multi-threading (optional)
+setwd(".")
 
-PPMI_FILE <- "data/Working_file_ppmi_project_151 with phenotypes7.12.25.csv"
-N_META    <- 31                    # phenotype columns before the proteins
-OUTDIR    <- "results/WGCNA"
-dir.create(OUTDIR, recursive = TRUE, showWarnings = FALSE)
-out <- function(f) file.path(OUTDIR, f)
+#=====================================================================================
+#
+#  Code chunk 1	Load raw data
+#
+#=====================================================================================
 
-# Group definitions. In the published analysis the LRRK2 and GBA groups
-# include both PD patients and non-manifesting (prodromal) carriers.
-# Set INCLUDE_PRODROMAL <- FALSE to restrict them to PD patients.
-INCLUDE_PRODROMAL <- TRUE
+protein_matrix <- read.csv("./ppmi_project_151.csv", header = T, row.names = 1)
+head(protein_matrix, n=20)
+table(protein_matrix$GROUP)
 
-TREE_CUT_HEIGHT <- 40              # sample-clustering height for outlier removal
 
-# Network parameters
-SOFT_POWER     <- 10               # chosen from the scale-free topology plot
-MIN_MODULE     <- 30
-DEEP_SPLIT     <- 3
-MERGE_HEIGHT   <- 0.2
-NETWORK_TYPE   <- "signed"
+protein_matrix$GROUP <- with(protein_matrix,
+                             ifelse(GROUP %in% c("PD_LRRK2", "Pro_LRRK2"), "PD_LRRK2",
+                                    ifelse(GROUP %in% c("PD_GBA",   "Pro_GBA"),   "PD_GBA",
+                                           ifelse(GROUP %in% c("HC"),                    "HC",
+                                                  ifelse(GROUP %in% c("sPD"),                   "sPD",
+                                                         NA)))))
 
-# MM vs. GS scatter plots to draw: module, trait, proteins to label
-SCATTERS <- list(
-  list(module = "greenyellow", trait = "sPD",   label = NULL),
-  list(module = "blue",        trait = "sPD",   label = NULL),
-  list(module = "grey",        trait = "LRRK2",
-       label = c("HLA_DQA2", "GPNMB_8240_207_3", "GPNMB_5080_131_3", "GAA", "GAPDH",
-                 "PPT1", "CTSA", "PARK7_9845_33_3", "CTSH_8644_46_3", "CTSD"))
-)
+table(protein_matrix$GROUP)
+protein_matrix <- protein_matrix[protein_matrix$GROUP %in% c('HC','PD_LRRK2', 'PD_GBA', 'sPD'), ]
+table(protein_matrix$GROUP)
 
-# Hub networks for Cytoscape: module = edge-weight threshold
-HUB_MODULES <- c(turquoise = 0.21)
-N_HUB       <- 10
+filtered_expression_data <- protein_matrix[, -c(1:31)]
 
-# Enrichment: proteins in a module with GS for a trait above a cutoff
-ENRICH_SETS <- list(
-  list(module = "turquoise",   trait = "LRRK2", gs_min = 0.1)
-  # list(module = "greenyellow", trait = "sPD",   gs_min = 0.1)
-)
+colnames(filtered_expression_data) <- sapply(strsplit(colnames(filtered_expression_data), "_"), function(x) paste(x[3:length(x)], collapse = "_"))
 
-## ---- Helper: protein name -> gene symbol ------------------------------------
-# Protein names are "GENE" or "GENE_SeqId" (e.g. GPNMB_8240_207_3);
-# hyphenated symbols appear with "_" (e.g. HLA_DQA2 = HLA-DQA2).
-valid_symbols <- keys(org.Hs.eg.db, keytype = "SYMBOL")
-to_symbol <- function(x) {
-  core <- sub("_[0-9]+_[0-9]+_[0-9]+$", "", x)
-  hyph <- gsub("_", "-", core)
-  ifelse(hyph %in% valid_symbols, hyph, sub("_.*$", "", core))
+data <- filtered_expression_data
+dim(data)
+                                             
+
+#=====================================================================================
+#
+#  Code chunk 2	Load traits data
+#
+#=====================================================================================
+
+traits <- protein_matrix[, c(2,4)]
+
+# Generate dummy variables for each group
+traitMat <- model.matrix(~ GROUP - 1, data = traits)
+# This yields columns:
+#   GROUPHC    (1 if HC, else 0)   GROUPPD_GBA   GROUPPD_LRRK2
+
+# Ensure rownames match samples
+rownames(traitMat) <- rownames(traits)
+
+# 1. QC - outlier detection ------------------------------------------------
+# detect outlier genes, should row samples, columne gene/protein names
+pdf("Cluster Dendrogram.pdf", 5,4)
+
+gsg <- goodSamplesGenes(data)
+summary(gsg)
+gsg$allOK
+
+table(gsg$goodGenes)
+table(gsg$goodSamples)
+
+# remove genes that are detectd as outliers
+data_z <- data[gsg$goodGenes == TRUE,]
+
+# detect outlier samples - hierarchical clustering - method 1
+htree <- hclust(dist(data), method = "average")
+plot(htree)
+
+dev.off()
+
+# pca - method 2 should row samples, columne gene/protein names
+pdf("PCA of the samples.pdf", 5,4)
+pca <- prcomp(data)
+pca.dat <- pca$x
+
+pca.var <- pca$sdev^2
+pca.var.percent <- round(pca.var/sum(pca.var)*100, digits = 2)
+
+pca.dat <- as.data.frame(pca.dat)
+
+ggplot(pca.dat, aes(PC1, PC2)) +
+  geom_point() +
+  geom_text(label = rownames(pca.dat)) +
+  labs(x = paste0('PC1: ', pca.var.percent[1], ' %'),
+       y = paste0('PC2: ', pca.var.percent[2], ' %'))
+dev.off()
+
+# 2. QC - outlier detection ------------------------------------------------
+# detect outlier genes the column should be gene names, the rows should be samples.
+
+htree <- hclust(dist(data), method = "average")
+plot(htree)
+# Cut tree at a certain height (adjust height as needed, e.g., 60)
+clusters <- cutree(htree, h = 40)
+table(clusters)
+# Identify samples in very small clusters (potential outliers)
+for(i in c(2:13)){
+  # Extract sample names belonging to cluster i
+  outlier_samples <- names(clusters[clusters == i])
+  
+  # Create a file name dynamically for each cluster
+  file_name <- paste0("outlier_samples_cluster_", i, ".csv")
+  
+  # Save the outlier sample names to a CSV file
+  write.csv(outlier_samples, file = file_name, row.names = FALSE)
+  
 }
 
-## ---- 1. Load data and define groups -----------------------------------------
 
-protein_matrix <- read.csv(PPMI_FILE, header = TRUE, row.names = 1)
-print(table(protein_matrix$GROUP))
+outlier_samples <- c("3172","3363","41438","52146","55615", "57869", "3369", "58030",
+                     "3768", "3805", "4104", "3965", "42308", "58783", "40733", "41886")
 
-lrrk2 <- if (INCLUDE_PRODROMAL) c("PD_LRRK2", "Pro_LRRK2") else "PD_LRRK2"
-gba   <- if (INCLUDE_PRODROMAL) c("PD_GBA",   "Pro_GBA")   else "PD_GBA"
-protein_matrix$GROUP <- ifelse(protein_matrix$GROUP %in% lrrk2, "LRRK2",
-                        ifelse(protein_matrix$GROUP %in% gba,   "GBA",
-                        ifelse(protein_matrix$GROUP == "HC",    "HC",
-                        ifelse(protein_matrix$GROUP == "sPD",   "sPD", NA))))
-protein_matrix <- protein_matrix[!is.na(protein_matrix$GROUP), ]
-print(table(protein_matrix$GROUP))
+# Remove outliers from the dataset
+data <- filtered_expression_data[!rownames(filtered_expression_data) %in% outlier_samples, ]
 
-# Expression matrix: samples in rows, proteins in columns
-ProData <- protein_matrix[, -(1:N_META)]
-colnames(ProData) <- sapply(strsplit(colnames(ProData), "_"),
-                            function(x) paste(x[3:length(x)], collapse = "_"))
+dim(data)
 
-## ---- 2. Quality control -------------------------------------------------------
 
-# 2a. Proteins/samples with too many missing values or zero variance
-gsg <- goodSamplesGenes(ProData, verbose = 3)
-ProData <- ProData[gsg$goodSamples, gsg$goodGenes]
+# Get the row names of the expression dataset
+expression_samples <- rownames(data)
 
-# 2b. Outlier samples: cluster samples, cut the tree, keep the largest cluster
-sampleTree <- hclust(dist(ProData), method = "average")
-clusters   <- cutree(sampleTree, h = TREE_CUT_HEIGHT)
-keep       <- clusters == as.integer(names(which.max(table(clusters))))
-cat("Outlier samples removed:", sum(!keep), "\n")
+# Subset phenotypeData to include only those rows that are in the expression dataset
+traitMat <- traitMat[rownames(traitMat) %in% expression_samples, ]
 
-pdf(out("QC sample clustering.pdf"), 12, 5)
-plot(sampleTree, main = "Sample clustering", sub = "", xlab = "", cex = 0.3)
-abline(h = TREE_CUT_HEIGHT, col = "red")
+# Check if the row names now match
+all(rownames(traitMat) %in% rownames(data))  # Should return TRUE
+
+#=====================================================================================
+#
+#  Code chunk 2	Load WGCNA package 
+#
+#=====================================================================================
+
+# Load the WGCNA package
+library(WGCNA);
+# The following setting is important, do not omit.
+options(stringsAsFactors = FALSE);
+# Read in the proteomic data set		
+ProData = as.data.frame(data)
+# Take a quick look at what is in the data set:
+dim(ProData) #should row samples, columne gene/protein names
+
+names(ProData)
+
+#=====================================================================================
+#
+#  Code chunk 3 SoftThreshold chosen
+#
+#=====================================================================================
+
+# Choose a set of soft-thresholding powers
+powers = c(c(1:10), seq(from = 12, to=30, by=2))
+# Call the network topology analysis function
+sft = pickSoftThreshold(ProData, powerVector = powers, verbose = 5, networkType = "signed")
+# Plot the results:
+pdf("Topology model and mean connectivity.pdf",10,5)
+
+cex1 = 0.9;
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit R^2",type="n",
+     main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.85,col="red")
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+     xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+     main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
 dev.off()
 
-ProData        <- ProData[keep, ]
-protein_matrix <- protein_matrix[rownames(ProData), ]
-print(table(protein_matrix$GROUP))
+#=====================================================================================
+#
+#  Code chunk 4	WGCNA construction
+#
+#=====================================================================================
 
-# PCA after outlier removal (visual check)
-pca <- prcomp(ProData)
-pvar <- round(100 * pca$sdev^2 / sum(pca$sdev^2), 2)
-p <- ggplot(data.frame(pca$x[, 1:2], group = protein_matrix$GROUP),
-            aes(PC1, PC2, colour = group)) +
-  geom_point(size = 1) +
-  labs(x = paste0("PC1: ", pvar[1], "%"), y = paste0("PC2: ", pvar[2], "%")) +
-  theme_classic()
-ggsave(out("QC PCA of samples.pdf"), p, width = 5, height = 4)
-
-# Traits: one 0/1 indicator per group (group vs. all other participants)
-traitMat <- model.matrix(~ GROUP - 1, data = protein_matrix)
-colnames(traitMat) <- sub("^GROUP", "", colnames(traitMat))
-stopifnot(identical(rownames(traitMat), rownames(ProData)))
-
-nSamples <- nrow(ProData)
-cat("Samples:", nSamples, " Proteins:", ncol(ProData), "\n")
-
-## ---- 3. Soft-thresholding power ----------------------------------------------
-
-powers <- c(1:10, seq(12, 30, by = 2))
-sft <- pickSoftThreshold(ProData, powerVector = powers, networkType = NETWORK_TYPE, verbose = 5)
-write.csv(sft$fitIndices, out("Soft threshold fit indices.csv"), row.names = FALSE)
-
-pdf(out("Soft threshold.pdf"), 10, 5)
-par(mfrow = c(1, 2))
-fit_r2 <- -sign(sft$fitIndices[, 3]) * sft$fitIndices[, 2]
-plot(sft$fitIndices[, 1], fit_r2, type = "n", xlab = "Soft threshold (power)",
-     ylab = "Scale-free topology fit, signed R^2", main = "Scale independence")
-text(sft$fitIndices[, 1], fit_r2, labels = powers, cex = 0.9, col = "red")
-abline(h = 0.85, col = "red")
-plot(sft$fitIndices[, 1], sft$fitIndices[, 5], type = "n", xlab = "Soft threshold (power)",
-     ylab = "Mean connectivity", main = "Mean connectivity")
-text(sft$fitIndices[, 1], sft$fitIndices[, 5], labels = powers, cex = 0.9, col = "red")
-dev.off()
-
-## ---- 4. Network construction and module detection ----------------------------
+softPower = 10
 
 temp_cor <- cor
-cor <- WGCNA::cor                   # avoid clash with other packages' cor()
-net <- blockwiseModules(ProData, power = SOFT_POWER, networkType = NETWORK_TYPE,
-                        minModuleSize = MIN_MODULE, deepSplit = DEEP_SPLIT,
-                        reassignThreshold = 1e-3, mergeCutHeight = MERGE_HEIGHT,
-                        numericLabels = FALSE, pamRespectsDendro = FALSE,
-                        maxBlockSize = 20000, randomSeed = 1234, verbose = 3)
+cor <- WGCNA::cor
+
+#Test new settings
+net = blockwiseModules(ProData, power = softPower, 
+                       networkType = "signed",
+                       minModuleSize = 30,
+                       deepSplit        = 3,
+                       reassignThreshold = 1e-3, 
+                       mergeCutHeight = 0.2,
+                       numericLabels = F, pamRespectsDendro = FALSE,
+                       saveTOMs = TRUE,
+                       randomSeed = 1234,
+                       maxBlockSize = 20000,
+                       verbose = 3)
+
 cor <- temp_cor
 
-moduleColors <- net$colors
-print(table(moduleColors))
-write.csv(as.data.frame(table(module = moduleColors)), out("Module sizes.csv"), row.names = FALSE)
+table(net$colors)
 
-pdf(out("Protein dendrogram and modules.pdf"), 12, 9)
-plotDendroAndColors(net$dendrograms[[1]], cbind(net$unmergedColors, moduleColors),
-                    c("Unmerged", "Merged"), dendroLabels = FALSE, hang = 0.03,
+# Module Eigengenes ---------------------------------------------------------
+module_eigengenes <- net$MEs
+
+# Print out a preview
+head(module_eigengenes)
+
+write.csv(module_eigengenes, file = "The module eigengenes.csv", row.names = TRUE)
+# get number of genes for each module
+table(net$colors)
+modulegenes <- as.data.frame(net$colors)
+
+write.csv(modulegenes, file = "The genes in each module.csv", row.names = TRUE)
+write.csv(table(net$colors), file = "The gene numbers in each module.csv", row.names = TRUE)
+
+#=====================================================================================
+#
+#  Code chunk 5	Clustering dendrograms for peptides
+#
+#=====================================================================================
+
+
+pdf("Cluster Dendrogram.pdf",12,9)
+
+mergedColors = labels2colors(net$colors)
+# Plot the dendrogram and the module colors underneath
+plotDendroAndColors(net$dendrograms[[1]], cbind(net$unmergedColors, net$colors),
+                    c("unmerged", "merged"),
+                    dendroLabels = FALSE, hang = 0.03,
                     addGuide = TRUE, guideHang = 0.05)
+dev.off()					
+
+
+#=====================================================================================
+#
+#  Code chunk 6	Modules analysis
+#
+#=====================================================================================
+                                             
+moduleLabels = net$colors
+moduleColors = net$colors
+
+MEs = net$MEs;
+geneTree = net$dendrograms[[1]];
+
+#=====================================================================================
+#
+#  Code chunk 7	Peptide significance caculation
+#
+#=====================================================================================
+
+
+# Define numbers of genes and samples
+nGenes = ncol(ProData);
+nSamples = nrow(ProData);
+# Recalculate MEs with color labels
+MEs0 = moduleEigengenes(ProData, moduleColors)$eigengenes
+MEs = orderMEs(MEs0)
+moduleTraitCor = cor(MEs, traitMat, use = "p");
+moduleTraitPvalue = corPvalueStudent(moduleTraitCor, nSamples);
+
+#=====================================================================================
+#
+#  Code chunk 8	Module-trait relationships
+#
+#=====================================================================================
+
+                                             
+# open a graphics window
+pdf("Module-trait relationship.pdf",5,8)
+
+textMatrix =  paste(signif(moduleTraitCor, 2), "\n(",
+                    signif(moduleTraitPvalue, 1), ")", sep = "");
+dim(textMatrix) = dim(moduleTraitCor)
+par(mar = c(6, 8.5, 3, 3));
+# Display the correlation values within a heatmap plot
+labeledHeatmap(Matrix = moduleTraitCor,
+               xLabels = colnames(traitMat),
+               yLabels = colnames(MEs),
+               ySymbols = colnames(MEs),
+               colorLabels = FALSE,
+               colors = blueWhiteRed(50),
+               textMatrix = textMatrix,
+               setStdMargins = FALSE,
+               cex.text = 0.8,
+               zlim = c(-1,1),
+               main = paste("Module-trait relationships"))
+
+
 dev.off()
 
-## ---- 5. Module-trait relationships -------------------------------------------
+                                             
+#=====================================================================================
+#
+#  Code chunk 9 Correlated eigenpeptide in modules associated with traits
+#
+#=====================================================================================
 
-MEs <- orderMEs(moduleEigengenes(ProData, moduleColors)$eigengenes)
-write.csv(MEs, out("Module eigengenes.csv"))
+##Compute Gene–Trait Significance (GS) for all traits, not only only trait
 
-moduleTraitCor    <- cor(MEs, traitMat, use = "p")
-moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nSamples)
+modNames = substring(names(MEs), 3)
 
-pdf(out("Module-trait relationships.pdf"), 5, 8)
-par(mar = c(6, 8.5, 3, 3))
-textMatrix <- paste0(signif(moduleTraitCor, 2), "\n(", signif(moduleTraitPvalue, 1), ")")
-dim(textMatrix) <- dim(moduleTraitCor)
-labeledHeatmap(Matrix = moduleTraitCor, xLabels = colnames(traitMat),
-               yLabels = colnames(MEs), ySymbols = colnames(MEs),
-               colorLabels = FALSE, colors = blueWhiteRed(50), textMatrix = textMatrix,
-               setStdMargins = FALSE, cex.text = 0.8, zlim = c(-1, 1),
-               main = "Module-trait relationships")
+# Calculate gene module membership: correlation between gene expression and module eigengenes
+geneModuleMembership <- as.data.frame(cor(ProData, MEs, use = "p"))
+MMPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneModuleMembership), nSamples))
+
+# Rename columns for clarity
+names(geneModuleMembership) <- paste("MM", modNames, sep = "")
+names(MMPvalue) <- paste("p.MM", modNames, sep = "")
+
+# Calculate gene-trait significance for all traits
+geneTraitSignificance <- as.data.frame(cor(ProData, traitMat, use = "p"))
+GSPvalue <- as.data.frame(corPvalueStudent(as.matrix(geneTraitSignificance), nSamples))
+
+# Rename columns so that each trait’s GS is clearly labeled
+names(geneTraitSignificance) <- paste("GS.", colnames(traitMat), sep = "")
+names(GSPvalue) <- paste("p.GS.", colnames(traitMat), sep = "")
+
+
+#=====================================================================================
+#
+#  Code chunk 10	WGCNA results Output 
+#
+#=====================================================================================
+
+# Create a starting data frame with peptide names, module colors, and gene-trait significance info
+geneInfo <- data.frame(
+  Peptides = names(ProData),
+  moduleColor = moduleColors,
+  geneTraitSignificance,
+  GSPvalue
+)
+
+# Optionally, add module membership information for each module
+for (mod in 1:ncol(geneModuleMembership)) {
+  geneInfo <- cbind(geneInfo,
+                    geneModuleMembership[, mod],
+                    MMPvalue[, mod])
+  # Rename new columns accordingly:
+  names(geneInfo)[(ncol(geneInfo)-1):ncol(geneInfo)] <- c(
+    paste("MM.", modNames[mod], sep = ""),
+    paste("p.MM.", modNames[mod], sep = "")
+  )
+}
+
+# Order the genes by module and by significance for one of the traits (if needed)
+geneOrder <- order(geneInfo$moduleColor, -abs(geneInfo[, grep("GS.", names(geneInfo))[1]]))
+geneInfo <- geneInfo[geneOrder, ]
+
+# Save the combined results if desired
+write.csv(geneInfo, file = "All traits of WGCNA result.csv", row.names = FALSE)
+
+
+#=====================================================================================
+#
+#  Code chunk 11	Network heatmap plot visulization
+#
+#=====================================================================================
+
+# Calculate topological overlap anew: this could be done more efficiently by saving the TOM
+# calculated during module detection, but let us do it again here.
+dissTOM = 1-TOMsimilarityFromExpr(ProData, power = softPower, networkType = "signed" );
+# Transform dissTOM with a power to make moderately strong connections more visible in the heatmap
+plotTOM = dissTOM^7;
+# Set diagonal to NA for a nicer plot
+diag(plotTOM) = NA;
+# Call the plot function
+
+pdf("Network heatmap plot.pdf",9,9)
+# sizeGrWindow(9,9)
+TOMplot(plotTOM, geneTree, moduleColors, main = "Network heatmap plot")
 dev.off()
 
-## ---- 6. Protein-level results: GS and MM -------------------------------------
+#=====================================================================================
+#
+#  Code chunk 12 Exporting Network to external visualization software
+#
+#=====================================================================================
 
-modNames <- substring(names(MEs), 3)
+# Cytoscape or VisANT plot and software
+probes = names(ProData)
+TOM=1-dissTOM
+modules = c(moduleColors[!duplicated(moduleColors)])
 
-# Module membership (MM): correlation of each protein with each module eigengene
-MM  <- as.data.frame(cor(ProData, MEs, use = "p"));  names(MM) <- paste0("MM.", modNames)
-pMM <- as.data.frame(corPvalueStudent(as.matrix(MM), nSamples)); names(pMM) <- paste0("p.MM.", modNames)
+for (i in seq(1, nrow(table(modules)))){
+  inModule=is.finite(match(moduleColors,modules[i]))
+  modProbes=probes[inModule]
+  modTOM = TOM[inModule, inModule]
+  dimnames(modTOM) = list(modProbes, modProbes)
+  cyt = exportNetworkToCytoscape(modTOM,
+                                 edgeFile=paste("Proteome network CytoEdge ",paste(modules[i],collapse="-"),".txt",sep=""),
+                                 nodeFile=paste("Proteome network CytoNode ",paste(modules[i],collapse="-"),".txt",sep=""),
+                                 weighted = TRUE, threshold = 0.02)
+  #  vis = exportNetworkToVisANT(modTOM,
+  #                              file=paste("Example-1 Proteome network VisANTInput ", modules[i],  sep=""),
+  #                              weighted=TRUE,threshold = 0.02)
+}
 
-# Gene significance (GS): correlation of each protein with each group indicator
-GS  <- as.data.frame(cor(ProData, traitMat, use = "p")); names(GS) <- paste0("GS.", colnames(traitMat))
-pGS <- as.data.frame(corPvalueStudent(as.matrix(GS), nSamples)); names(pGS) <- paste0("p.GS.", colnames(traitMat))
+#=====================================================================================
+#
+#  Code chunk 13 Exporting top hub Network to external visualization software
+#
+#=====================================================================================
 
-mm_cols <- as.vector(rbind(names(MM), names(pMM)))           # MM.x, p.MM.x, MM.y, ...
-geneInfo <- data.frame(Protein = colnames(ProData), Gene = to_symbol(colnames(ProData)),
-                       moduleColor = moduleColors, GS, pGS, cbind(MM, pMM)[, mm_cols],
-                       check.names = FALSE)
-geneInfo <- geneInfo[order(geneInfo$moduleColor, -abs(geneInfo$GS.HC)), ]
-write.csv(geneInfo, out("WGCNA results all proteins.csv"), row.names = FALSE)
+# choose red module
+module = c("turquoise");
+inModule = (moduleColors==module);
+modProbes = probes[inModule];
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
 
-## ---- 7. MM vs. GS scatter plots ----------------------------------------------
+# choose the top 10 node with highest conncetion
+nTop = 10;
+IMConn = softConnectivity(ProData[, probes[is.finite(match(moduleColors,module))]]);
+top = (rank(-IMConn) <= nTop)
 
-for (s in SCATTERS) {
-  inMod <- moduleColors == s$module
-  x <- MM[inMod, paste0("MM.", s$module)]
-  y <- GS[inMod, paste0("GS.", s$trait)]
-  pdf(out(sprintf("MM vs GS %s module, %s.pdf", s$module, s$trait)), 4.5, 4.5)
-  verboseScatterplot(x, y, col = s$module, xlim = c(-1, 1), ylim = c(-1, 1),
-                     xlab = paste("Module membership in", s$module, "module"),
-                     ylab = paste("Protein significance for", s$trait),
-                     main = paste("Module membership vs.", s$trait, "\n"),
-                     cex.main = 1.1, cex.lab = 1.1, cex.axis = 1.1)
-  lab <- intersect(s$label, rownames(MM)[inMod])
-  if (length(lab) > 0) {
-    text(MM[lab, paste0("MM.", s$module)], GS[lab, paste0("GS.", s$trait)],
-         labels = lab, pos = 2, cex = 0.7, col = "red")
-  }
+# network file for cystoscape software 
+cyt = exportNetworkToCytoscape(modTOM[top, top],
+                               edgeFile=paste("Proteome network CytoEdge ",paste(module,collapse="-"),"-top10.txt",sep=""),
+                               nodeFile=paste("Proteome network CytoNode ",paste(module,collapse="-"),"-top10.txt",sep=""),
+                               weighted = TRUE, threshold = 0.21)
+
+
+# choose pink module
+module = c("grey");
+inModule = (moduleColors==module);
+modProbes = probes[inModule];
+modTOM = TOM[inModule, inModule];
+dimnames(modTOM) = list(modProbes, modProbes)
+
+# choose the top 10 node with highest conncetion
+nTop = 10;
+IMConn = softConnectivity(ProData[, probes[is.finite(match(moduleColors,module))]]);
+top = (rank(-IMConn) <= nTop)
+cyt = exportNetworkToCytoscape(modTOM[top, top],
+                               edgeFile=paste("Proteome network CytoEdge ",paste(module,collapse="-"),"-top10.txt",sep=""),
+                               nodeFile=paste("Proteome network CytoNode ",paste(module,collapse="-"),"-top10.txt",sep=""),
+                               weighted = TRUE, threshold = 0.11)
+
+
+#=====================================================================================
+#
+#  Code chunk 14 Module membership vs. peptide significance
+#
+#=====================================================================================
+
+# choose red module vs. Genotype_Treatment
+
+pdf("The Module membership vs peptide significance for sPD_greenyellow.pdf",4,4)
+module = "greenyellow"								
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+par(mfrow = c(1,1));
+verboseScatterplot(geneModuleMembership[moduleGenes, column],
+                   geneTraitSignificance[moduleGenes, 4],
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Peptide significance for sPD",
+                   main = paste("Module membership vs. sPD\n"),
+                   cex.main = 1.3, cex.lab = 1.2, cex.axis = 1.2, col = module,xlim=c(-1,1),ylim=c(-1,1))
+# If plotting into a file, close it
+dev.off(); 
+
+# choose pink module vs. Genotype_Treatment
+
+pdf("The Module membership vs peptide significance for sPD_blue.pdf",4,4)
+module = "blue"								
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+par(mfrow = c(1,1));
+verboseScatterplot(geneModuleMembership[moduleGenes, column],
+                   geneTraitSignificance[moduleGenes, 4],
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Peptide significance for sPD",
+                   main = paste("Module membership vs. sPD\n"),
+                   cex.main = 1.3, cex.lab = 1.2, cex.axis = 1.2, col = module,xlim=c(-1,1),ylim=c(-1,1))
+# If plotting into a file, close it
+dev.off(); 
+
+# choose tan module vs. Genotype_Treatment 
+
+pdf("The Module membership vs peptide significance for sPD_grey.pdf.pdf")
+module = "grey"								
+column = match(module, modNames);
+moduleGenes = moduleColors==module;
+sizeGrWindow(7, 7);
+# pdf(file = "Plots/MMvsGS-1.pdf", width=7, height=7);
+par(mfrow = c(1,1));
+
+# Assume 'selectedGenes' contains the indices or names of the points to label.
+selectedGenes <- c("C1QTNF1","GREM2","VIP","PSAP","ENTPD1_3182_38_2", "TMEM106A", "CTSB_3061_61_2", "CTSH_8465_52_3", 
+                   "CTSO","CTSB_8007_19_3","CTSH_3737_6_3", 
+                   "CTSE", "CTSZ", "SMPD1","MANBA", "GNS_8314_71_3", "IDS",
+                   "ARSA_3583_54_4", "ACP2", "TMEM106B", "CLN5_8874_53_3", "LRP2", "TMEM9_9249_17_3", "PLD3",
+                   "NAGPA", "GNPTG", "PLD3", "PLA2G7", "SMPD1", "LRP2" ) # Replace with your labels of interest.
+
+
+selectedGenes <- c("HLA_DQA2","GPNMB_8240_207_3", "GPNMB_5080_131_3", "GAA", "GAPDH", "PPT1", "CTSA", "PARK7_9845_33_3",
+                   "CTSH_8644_46_3", "CTSD", "") 
+
+
+# Get the row names for the current module
+moduleGeneNames <- rownames(geneModuleMembership)[moduleGenes]
+
+# Identify selected genes that belong to the current module
+selectedInModule <- moduleGeneNames[moduleGeneNames %in% selectedGenes]
+
+
+verboseScatterplot(geneModuleMembership[moduleGenes, column],
+                   geneTraitSignificance[moduleGenes, 3],
+                   xlab = paste("Module Membership in", module, "module"),
+                   ylab = "Peptide significance for LRRK2 PD",
+                   main = paste("Module membership vs. LRRK2 PD  response\n"),
+                   cex.main = 1.3, cex.lab = 1.2, cex.axis = 1.2, col = module,xlim=c(-1,1),ylim=c(-1,1))
+
+# Add labels to the selected genes
+text(
+  geneModuleMembership[selectedInModule, column],
+  geneTraitSignificance[selectedInModule, 3],
+  labels = selectedInModule, pos = 2, cex = 0.8, col = "red"
+)
+# If plotting into a file, close it
+dev.off();
+
+
+#=====================================================================================
+#
+#  Code chunk 15 Module membership vs. peptide significance
+#
+#=====================================================================================
+                                             
+library(clusterProfiler)
+library(DOSE)
+library(org.Hs.eg.db)
+library(topGO)
+
+#############################################
+WGCNA_data <- read.csv("All traits of WGCNA result.csv", row.names = 1)
+id_data <- WGCNA_data[WGCNA_data$moduleColor == "turquoise" & WGCNA_data$GS.GROUPPD_LRRK2 > 0.1, ]
+genes <- id_data$X
+
+# Convert gene symbols to Entrez IDs
+gene_entrez <- bitr(genes, fromType = "SYMBOL", 
+                    toType = "ENTREZID", 
+                    OrgDb = org.Hs.eg.db)
+
+# Find the genes that failed to map
+failed_genes <- setdiff(genes, gene_entrez$SYMBOL)
+
+# Print the failed genes
+print("Failed to map genes:")
+print(failed_genes)
+
+library(stringr)
+ego_cc<-enrichGO(gene       = gene_entrez$ENTREZID,
+                 OrgDb      = org.Hs.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "CC",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05,
+                 readable = T)
+head(ego_cc, 4)
+ego_bp<-enrichGO(gene       = gene_entrez$ENTREZID,
+                 OrgDb      = org.Hs.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "BP",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05,
+                 readable = T)
+head(ego_bp, 4)
+
+ego_mf<-enrichGO(gene       = gene_entrez$ENTREZID,
+                 OrgDb      = org.Hs.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "MF",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05,
+                 readable = T)
+head(ego_mf, 4)
+
+
+# 1. collect your GO objects
+ego_list <- list(
+  CC = ego_cc
+  #BP = ego_bp,
+  #MF = ego_mf
+)
+
+# 2. define your frameless, vertical‐strip theme with big text
+strip_theme <- theme(
+  panel.border     = element_blank(),
+  panel.background = element_blank(),
+  panel.grid       = element_blank(),
+  
+  # y‐axis labels (the GO terms)
+  axis.text.y      = element_text(size = 14),      # bump category names
+  axis.title.y     = element_text(size = 16),      # if you ever add a y‐title
+  
+  # legend (color/size scales, if shown)
+  legend.title     = element_text(size = 14),
+  legend.text      = element_text(size = 12),
+  
+  # remove x‐axis entirely
+  axis.title.x     = element_blank(),
+  axis.text.x      = element_blank(),
+  axis.ticks.x     = element_blank()
+)
+
+for (ont in names(ego_list)) {
+  ego_obj <- ego_list[[ont]]
+  
+  # 3. write out the table
+  write.csv(
+    as.data.frame(ego_obj),
+    file = sprintf("The_GO_%s_of_cluster_proteins_in_turqouise LRRK2_PD.csv", ont),
+    row.names = FALSE
+  )
+  
+  # 4. make a dotplot with larger text  
+  p <- dotplot(
+    ego_obj,
+    showCategory = 10,
+    x            = "GeneRatio",
+    font.size    = 12         # increases the label text inside the plot
+  ) +
+    aes(x = 1) +              # collapse to a vertical strip
+    scale_x_continuous(NULL, breaks = NULL) +
+    strip_theme
+  
+  # 5. save as PDF
+  pdf(
+    sprintf("GO_%s_vertical_dotplot_cluster_proteins_in_turquoise LRRK2 PD.pdf", ont),
+    width  = 5,
+    height = 6
+  )
+  print(p)
   dev.off()
 }
 
-## ---- 8. Hub-protein networks for Cytoscape ----------------------------------
 
-# Topological overlap of the whole network (same settings as module detection)
-TOM <- TOMsimilarityFromExpr(ProData, power = SOFT_POWER, networkType = NETWORK_TYPE)
-dimnames(TOM) <- list(colnames(ProData), colnames(ProData))
+# Perform KEGG pathway enrichment
+kegg_enrichment <- enrichKEGG(gene      = gene_entrez$ENTREZID,
+                              organism  = 'hsa',  # KEGG organism code for humans
+                              pvalueCutoff = 0.05, 
+                              keyType = 'ncbi-geneid')
 
-for (m in names(HUB_MODULES)) {
-  inMod  <- moduleColors == m
-  modTOM <- TOM[inMod, inMod]
-  # hubs = the N_HUB proteins with the highest intramodular connectivity
-  # (softConnectivity default power = 6, as in the original analysis)
-  top <- rank(-softConnectivity(ProData[, inMod])) <= N_HUB
-  exportNetworkToCytoscape(modTOM[top, top], weighted = TRUE, threshold = HUB_MODULES[[m]],
-    edgeFile = out(paste0("Cytoscape edges ", m, " top", N_HUB, ".txt")),
-    nodeFile = out(paste0("Cytoscape nodes ", m, " top", N_HUB, ".txt")))
-}
+# 2. Make results human-readable
+kegg_res <- setReadable(kegg_enrichment, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
 
-## ---- 9. GO and KEGG enrichment of selected module proteins ------------------
+head(kegg_res)
 
-strip_theme <- theme(
-  panel.border = element_blank(), panel.background = element_blank(),
-  panel.grid = element_blank(), axis.text.y = element_text(size = 14),
-  legend.title = element_text(size = 14), legend.text = element_text(size = 12),
-  axis.title.x = element_blank(), axis.text.x = element_blank(), axis.ticks.x = element_blank()
-)
 
-for (e in ENRICH_SETS) {
-  sel   <- geneInfo$moduleColor == e$module & geneInfo[[paste0("GS.", e$trait)]] > e$gs_min
-  genes <- unique(geneInfo$Gene[sel])
-  stem  <- sprintf("%s module, GS %s > %s", e$module, e$trait, e$gs_min)
-  gene_entrez <- suppressWarnings(bitr(genes, "SYMBOL", "ENTREZID", OrgDb = org.Hs.eg.db))
-  cat(stem, ":", length(genes), "genes; failed to map:",
-      paste(setdiff(genes, gene_entrez$SYMBOL), collapse = ", "), "\n")
-
-  for (ont in c("CC", "BP", "MF")) {
-    ego <- enrichGO(gene_entrez$ENTREZID, OrgDb = org.Hs.eg.db, keyType = "ENTREZID",
-                    ont = ont, pvalueCutoff = 0.05, qvalueCutoff = 0.05, readable = TRUE)
-    if (is.null(ego) || nrow(as.data.frame(ego)) == 0) next
-    write.csv(as.data.frame(ego), out(sprintf("GO_%s %s.csv", ont, stem)), row.names = FALSE)
-    p <- dotplot(ego, showCategory = 10, x = "GeneRatio", font.size = 12) +
-      aes(x = 1) + scale_x_continuous(NULL, breaks = NULL) + strip_theme
-    ggsave(out(sprintf("GO_%s vertical dotplot %s.pdf", ont, stem)), p, width = 5, height = 6)
-  }
-
-  kegg <- enrichKEGG(gene_entrez$ENTREZID, organism = "hsa", keyType = "ncbi-geneid",
-                     pvalueCutoff = 0.05)
-  if (!is.null(kegg) && nrow(as.data.frame(kegg)) > 0) {
-    kegg <- setReadable(kegg, OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
-    write.csv(as.data.frame(kegg), out(sprintf("KEGG %s.csv", stem)), row.names = FALSE)
-    ggsave(out(sprintf("KEGG dotplot %s.pdf", stem)),
-           dotplot(kegg, x = "GeneRatio", showCategory = 15), width = 4.5, height = 4)
-  }
-}
-
-writeLines(c(paste("Run date:", Sys.Date()), capture.output(sessionInfo())),
-           out("sessionInfo.txt"))
+pdf('The dotplot of KEGG enrichment analysis of cluster_proteins_in_greenyellow sPD.pdf', 4.5,4)
+dotplot(kegg_res, x = "GeneRatio", showCategory = 15)
+dev.off()
+write.csv(kegg_enrichment, file = "The KEGG of cluster_proteins_in_greenyellow sPD.csv")
