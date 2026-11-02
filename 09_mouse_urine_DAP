@@ -1,0 +1,312 @@
+library(ggplot2)
+library(stats)
+data <- read.csv("./The mouse urine proteomic data 70% filtered, log2 transferred, normal dis imputation.csv", header = T, row.names = 1)
+phenotypeData <- read.delim('./Phenotype.txt', header = T, row.names = 1)
+
+#median normalization
+medians <- apply(data, 2, median, na.rm = TRUE)
+max_med <- max(medians)
+data <- sweep(data, 2, medians, FUN = "/") * max_med
+
+
+#sample info
+control_ids <- c("WT_1","WT_2","WT_3","WT_4","WT_5")
+gs_ids      <- c("hLRRK2G2019S_1","hLRRK2G2019S_2","hLRRK2G2019S_3","hLRRK2G2019S_4")
+
+sample_data <- data.frame(
+  Sample    = c(control_ids, gs_ids),                    # order to match your column selection below
+  GROUP = factor(c(rep("WT", 5), rep("hLRRK2G2019S", 4)),
+                 levels = c("WT","hLRRK2G2019S")),
+  stringsAsFactors = FALSE,
+  row.names = c(control_ids, gs_ids)
+)
+
+filtered_new_data <- data[, c(1:5,6:9)]
+
+head(sample_data)
+head(filtered_new_data)
+
+# 1) Names must match as a set     make sure the order of sample_data and samples in the filtered data are the same order, very important!!
+stopifnot(setequal(colnames(filtered_new_data), rownames(sample_data)))
+# 2) Enforce identical order
+filtered_new_data  <- filtered_new_data[, rownames(sample_data), drop = FALSE]
+stopifnot(identical(colnames(filtered_new_data), rownames(sample_data)))
+
+library(ggplot2)
+library(stats)
+
+pdf('pca.pdf')
+pca_result <- prcomp(t(filtered_new_data), scale. = TRUE)
+pca_df <- data.frame(PC1 = pca_result$x[,1], PC2 = pca_result$x[,2], condition = sample_data$GROUP)
+pca_df$sample_names <- rownames(pca_df) 
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = condition)) +
+  geom_point(size = 3) +
+  geom_text(aes(label = sample_names), vjust = -1, size = 3) +
+  labs(title = "PCA of Proteomic Data", x = "PC1", y = "PC2")
+dev.off()
+
+
+
+library(limma)
+
+# Create design matrix for the condition of interest   Control vs Treatment
+sample_data$GROUP <- factor(sample_data$GROUP, levels = c("WT", "hLRRK2G2019S"))
+
+
+design <- model.matrix(~ GROUP, data=sample_data)
+
+# Fit the linear model to the log2-transformed data
+fit <- lmFit(filtered_new_data, design)
+
+# Apply empirical Bayes moderation
+fit <- eBayes(fit)
+
+# Extract differentially expressed proteins for condition (Treated vs. Control)
+results <- topTable(fit, coef = "GROUPhLRRK2G2019S", number = Inf, adjust = "fdr")
+
+
+head(results)
+summary(results)
+sum(results$P.Value < 0.05, na.rm=TRUE)
+results <- results[order(results$P.Value),]
+head(results)
+
+
+write.csv(results, file = "Result of all proteins of hLRRK2G2019S vs. WT.csv")
+
+
+
+#get different expressed genes, condition is padj < 0.05, increased by 50% or decreased by 30%
+SD <- sd(results$logFC)
+DEPs <-subset(results, P.Value < 0.05 & (logFC > 1.5*SD | logFC < - 1.5*SD))
+
+dim(DEPs)
+head(DEPs)
+write.csv(DEPs,file= "Result of sigdiff (1.5*SD) proteins of hLRRK2G2019S vs. WT pvaule.csv")
+
+
+pdf('Volcanoplot for PB.pdf', 7.5,4.5)
+library(EnhancedVolcano)
+EnhancedVolcano(results, lab = row.names(results), x = 'logFC', y = 'P.Value', xlim = c(-7, 7), ylim=c(0,6),
+                pCutoff = 0.05, FCcutoff = 1.5*SD, gridlines.major = F, gridlines.minor = F,
+                legendLabels=c('NS','Log2FC','P.Value','Log2FC & P.Value'),
+                xlab = bquote(~Log[2] ~ "fold change"),
+                ylab = bquote(~-Log[10] ~ P.Value),
+                pointSize = 1,
+                legendPosition = "right",
+                legendLabSize = 14,
+                legendIconSize = 2,
+                legendDropLevels = F,
+                drawConnectors = T, min.segment.length = 0.0001, 
+                selectLab = c("Psap"),
+                title = NULL,subtitle = "hLRRK2G2019S vs.WT",
+                max.overlaps = 30)
+dev.off() 
+
+
+Total_genes <- DEPs
+
+Up_regulated_genes <- Total_genes[Total_genes$logFC > 1.5*SD & Total_genes$P.Value < 0.05,]
+Up_genes <- row.names(Up_regulated_genes)
+
+Down_regulated_genes <- Total_genes[Total_genes$logFC < -1.5*SD & Total_genes$P.Value < 0.05, ]
+Down_genes <- row.names(Down_regulated_genes)
+
+dim(DEPs)
+head(Up_genes)
+head(Down_genes)
+
+library(clusterProfiler)
+library(DOSE)
+library(org.Mm.eg.db)
+library(topGO)
+
+
+# Convert gene symbols to Entrez IDs
+gene_entrez <- bitr(Up_genes, fromType = "SYMBOL", 
+                    toType = "ENTREZID", 
+                    OrgDb = org.Mm.eg.db)
+
+# Find the genes that failed to map
+failed_genes <- setdiff(Up_genes, gene_entrez$SYMBOL)
+
+print("Failed to map genes:")
+print(failed_genes)
+
+#Go enrichment analysis
+library(stringr)
+ego_cc<-enrichGO(gene       = gene_entrez$ENTREZID,
+                 OrgDb      = org.Mm.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "CC",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05,
+                 readable      = TRUE)
+head(ego_cc, 10)
+
+ego_bp<-enrichGO(gene       = gene_entrez$ENTREZID,
+                 OrgDb      = org.Mm.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "BP",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05,
+                 readable      = TRUE)
+head(ego_bp, 10)
+
+ego_mf<-enrichGO(gene       = gene_entrez$ENTREZID,
+                 OrgDb      = org.Mm.eg.db,
+                 keyType    = 'ENTREZID',
+                 ont        = "MF",
+                 pvalueCutoff = 0.05,
+                 qvalueCutoff = 0.05,
+                 readable      = TRUE)
+head(ego_mf, 10)
+
+# 1. collect your GO objects
+ego_list <- list(
+  CC = ego_cc,
+  BP = ego_bp,
+  MF = ego_mf
+)
+
+# 2. define your frameless, vertical‐strip theme with big text
+strip_theme <- theme(
+  panel.border     = element_blank(),
+  panel.background = element_blank(),
+  panel.grid       = element_blank(),
+  
+  axis.text.y      = element_text(size = 14), 
+  axis.title.y     = element_text(size = 16), 
+  
+  legend.title     = element_text(size = 14),
+  legend.text      = element_text(size = 12),
+  
+  axis.title.x     = element_blank(),
+  axis.text.x      = element_blank(),
+  axis.ticks.x     = element_blank()
+)
+
+for (ont in names(ego_list)) {
+  ego_obj <- ego_list[[ont]]
+  
+  write.csv(
+    as.data.frame(ego_obj),
+    file = sprintf("The_GO_%s_of_enriched_proteins_in_up hLRRK2G2019S vs. WTpvalue.csv", ont),
+    row.names = FALSE
+  )
+  
+  p <- dotplot(
+    ego_obj,
+    showCategory = 10,
+    x            = "GeneRatio",
+    font.size    = 12   
+  ) +
+    aes(x = 1) +    
+    scale_x_continuous(NULL, breaks = NULL) +
+    strip_theme
+  
+  pdf(
+    sprintf("GO_%s_vertical_dotplot_up hLRRK2G2019S vs. WTpvalue.pdf", ont),
+    width  = 5,
+    height = 6
+  )
+  print(p)
+  dev.off()
+}
+
+# Perform KEGG pathway enrichment
+kegg_enrichment <- enrichKEGG(gene      = gene_entrez$ENTREZID,
+                              organism  =  'mmu', 
+                              pvalueCutoff = 0.05, 
+                              keyType = 'ncbi-geneid')
+
+# 2. Make results human-readable
+kegg_res <- setReadable(kegg_enrichment, OrgDb = org.Mm.eg.db, keyType = "ENTREZID")
+
+head(kegg_res)
+
+p <- dotplot(
+  kegg_res,
+  showCategory = 10,
+  x            = "GeneRatio",
+  font.size    = 12     
+) +
+  aes(x = 1) +   
+  scale_x_continuous(NULL, breaks = NULL) +
+  strip_theme
+
+pdf('The dotplot of KEGG enrichment analysis of up hLRRK2G2019S vs. WT.pdf',5,6)
+print(p)
+dev.off()
+write.csv(kegg_enrichment, file = "The KEGG of up hLRRK2G2019S vs. WT.csv")
+
+
+# Gene Set Enrichment Analysis（GSEA）
+sig.gen <- results
+
+gene_entrez <- bitr(row.names(sig.gen), fromType = "SYMBOL", 
+                    toType = "ENTREZID", 
+                    OrgDb = org.Mm.eg.db)
+
+failed_genes <- setdiff(row.names(sig.gen), gene_entrez$SYMBOL)
+
+print("Failed to map genes:")
+print(failed_genes)
+
+genelist <- sig.gen$logFC
+names(genelist) <- row.names(sig.gen)
+genelist <- sort(genelist, decreasing = TRUE)
+
+library(dplyr)
+
+df <- tibble(gene = names(genelist), score = genelist)
+
+# collapse by taking the value with largest |score|
+df2 <- df %>%
+  group_by(gene) %>%
+  slice_max(order_by = abs(score), n = 1) %>%
+  ungroup()
+
+genelist_unique <- df2$score
+names(genelist_unique) <- df2$gene
+genelist_unique <- sort(genelist_unique, decreasing = TRUE)
+
+gsebp <- gseGO(
+  geneList = genelist_unique,
+  OrgDb    = org.Mm.eg.db,
+  keyType  = "SYMBOL",
+  ont      = "BP",
+  pvalueCutoff = 0.05
+)
+
+pdf('The GSEA_BP dotplot.pdf', 5,6)
+dotplot(gsebp, x = 'NES', showCategory = 20, title = "Top 20 GSEBP Terms")
+dev.off()
+write.csv(gsebp, file = 'The GSEA_BP genesets.csv')
+
+gsemf <- gseGO(
+  geneList = genelist_unique,
+  OrgDb    = org.Mm.eg.db,
+  keyType  = "SYMBOL",
+  ont      = "MF",
+  pvalueCutoff = 0.05
+)
+
+pdf('The GSEA_MF dotplot.pdf', 5,6)
+dotplot(gsemf, x = 'NES', showCategory = 20, title = "Top 20 GSEMF Terms")
+dev.off()
+write.csv(gsemf, file = 'The GSEA_MF genesets.csv')
+
+gsecc <- gseGO(
+  geneList = genelist_unique,
+  OrgDb    = org.Mm.eg.db,
+  keyType  = "SYMBOL",
+  ont      = "CC",
+  pvalueCutoff = 0.05
+)
+
+pdf('The GSEA_CC dotplot.pdf', 5,6)
+dotplot(gsecc, x = 'NES', showCategory = 20, title = "Top 20 GSECC Terms")
+dev.off()
+write.csv(gsecc, file = 'The GSEA_CC genesets.csv')
