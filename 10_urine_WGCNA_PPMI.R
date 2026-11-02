@@ -1,3 +1,35 @@
+# =============================================================================
+# 10_urine_WGCNA_PPMI.R
+# Weighted gene co-expression network analysis (WGCNA) of urine proteins
+# (PPMI Project 190, MS)
+#
+# Manuscript: "Integrated Biofluid Proteomics Identified Dynamic Functional
+#              Biomarkers of LRRK2-Linked Parkinson's Disease Progression"
+#
+# Steps
+#   1. Load data, define groups (HC, LRRK2, GBA, sPD)
+#   2. Load traits data and Quality control: remove poor proteins/samples and outlier samples
+#      (hierarchical clustering of samples, tree cut at height 40)
+#   3. Choose the soft-thresholding power (scale-free topology)
+#   4. WGCNA construction and detect modules (blockwiseModules)
+#   5. Clustering dendrograms for peptides
+#   6. Modules analysis
+#   7. Peptide significance caculation
+#   8. Module-trait relationships
+#   9. Correlated eigenpeptide in modules associated with traits
+#   10. WGCNA results Output
+#   11. Network heatmap plot visulization
+#   12. Exporting Network to external visualization software
+#   13. Exporting top hub Network to external visualization software (cytoscope)
+#   14. Module membership vs. peptide significance
+#   15. GO TERM and KEGG analysis
+#
+# Input : ./ppmi_project_190.csv
+#           (first 31 columns = phenotypes; remaining columns = log2 MS
+#            abundances)
+# Output: results/WGCNA/
+# =============================================================================
+
 library(WGCNA)
 library(DESeq2)
 library(GEOquery)
@@ -13,7 +45,7 @@ setwd(".")
 #
 #=====================================================================================
 
-protein_matrix <- read.csv("./ppmi_project_151.csv.csv", header = T, row.names = 1)
+protein_matrix <- read.csv("./ppmi_project_190.csv.csv", header = T, row.names = 1)
 head(protein_matrix, n=20)
 protein_matrix <- protein_matrix[protein_matrix$EVENT_ID == "BL", ]
 row.names(protein_matrix) <- protein_matrix$PATNO
