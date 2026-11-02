@@ -1,3 +1,27 @@
+# =============================================================================
+# 09_mouse_urine_DAP.R
+# Differential abundance and GO/KEGG enrichment of urine proteins
+#
+# Manuscript: "Integrated Biofluid Proteomics Identified Dynamic Functional
+#              Biomarkers of LRRK2-Linked Parkinson's Disease Progression"
+#
+# For each comparison in COMPARISONS:
+#   1. PCA of all samples (quality control)
+#   2. limma: abundance ~ group; empirical Bayes moderated t test;
+#      Benjamini-Hochberg FDR
+#   3. Differentially abundant proteins (DAPs):
+#      FDR/p-value < 0.05 and |log2FC| > 1.5 x SD of all log2FC in that comparison
+#   4. Volcano plot
+#   5. GO (BP, CC, MF) and KEGG over-representation for down- and
+#      up-regulated DAPs
+#
+# Input : ./The mouse urine proteomic data 70% filtered, log2 transferred, normal dis imputation.csv
+#           (protein-group abundances that were log2-transformed, filtered (detected in >70% of samples) and
+#           imputed from a normal distribution in Perseus; see Methods)
+#          ./Phenotype.txt
+# Output: results/urine/<comparison>/
+# =============================================================================
+
 library(ggplot2)
 library(stats)
 data <- read.csv("./The mouse urine proteomic data 70% filtered, log2 transferred, normal dis imputation.csv", header = T, row.names = 1)
@@ -10,11 +34,11 @@ data <- sweep(data, 2, medians, FUN = "/") * max_med
 
 
 #sample info
-control_ids <- c("WT_1","WT_2","WT_3","WT_4","WT_5")
-gs_ids      <- c("hLRRK2G2019S_1","hLRRK2G2019S_2","hLRRK2G2019S_3","hLRRK2G2019S_4")
+control_ids <- c("WT_1","WT_2","WT_3","WT_4","WT_5")       #change the samples according to your comparions
+gs_ids      <- c("hLRRK2G2019S_1","hLRRK2G2019S_2","hLRRK2G2019S_3","hLRRK2G2019S_4")      #change the samples according to your comparions
 
 sample_data <- data.frame(
-  Sample    = c(control_ids, gs_ids),                    # order to match your column selection below
+  Sample    = c(control_ids, gs_ids),                    # order to match your column selection below, based on the opposites of each sample in the raw data
   GROUP = factor(c(rep("WT", 5), rep("hLRRK2G2019S", 4)),
                  levels = c("WT","hLRRK2G2019S")),
   stringsAsFactors = FALSE,
@@ -45,7 +69,6 @@ ggplot(pca_df, aes(x = PC1, y = PC2, color = condition)) +
   geom_text(aes(label = sample_names), vjust = -1, size = 3) +
   labs(title = "PCA of Proteomic Data", x = "PC1", y = "PC2")
 dev.off()
-
 
 
 library(limma)
