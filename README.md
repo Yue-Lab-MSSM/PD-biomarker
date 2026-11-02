@@ -20,23 +20,20 @@ Run scripts in numeric order. * = added in revision.
 | 01_CSF_DAP_PPMI.R | Differential abundance, LRRK2 PD vs HC (limma, age + sex); GO enrichment|
 | 02_CSF_WGCNA_PPMI.R | Co-expression network, module–trait correlation, module membership|
 | 03_ML_PPMI_to_LCC.R | Elastic-net model trained on PPMI, validated on LCC; label-permutation test (10,000)|
-| 04_CSF_DAP_LCC.R* | LCC differential abundance (age, sex, study centre); overlap with PPMI DAPs|
-| 05_crossplatform_SomaScan_Olink.R* | sPD vs HC model, SomaScan to Olink transfer (cross-fitted, n = 161)|
 
 ### CSF, PPMI mass spectrometry (Project 177): longitudinal
 | Script | Analysis|
 |---|---|
-| 06_LMM_sex_interaction.R | Linear mixed models, group × time × sex (lme4/lmerTest)|
-| 07_LMM_male.R* | Males only; model selection by AIC (ML), REML refit|
-| 08_LMM_female.R* | Females only; same pipeline|
+| 04_LMM_sex_interaction.R | Linear mixed models, group × time × sex (lme4/lmerTest)|
+| 05_LMM_male/female.R | Males only; model selection by AIC (ML), REML refit
 
 ### Urine
 | Script | Analysis|
 |---|---|
-| 09_urine_DAP_PPMI.R | Differential abundance, LRRK2 PD vs HC (Project 190)|
-| 10_urine_overlap_cohorts.R* | DAP overlap across PPMI, Columbia, LCC (counts, Jaccard index)|
-| 11_CSF_vs_urine_effects.R* | Comparison of CSF and urine effect sizes|
-| 12_mouse_urine_DEP.R | Lrrk2 G2019S vs WT mice (limma); GO enrichment|
+| 06_urine_DAP_PPMI.R | Differential abundance, LRRK2 PD vs HC (Project 190)|
+| 07_urine_WGCNA_PPMI.R | Co-expression network, module–trait correlation, module membership|
+| 08_ML_PPMI_to_LCC.R | Elastic-net model trained on PPMI, validated on LCC; label-permutation test (10,000)|
+| 09_mouse_urine_DEP.R | Lrrk2 G2019S vs WT mice (limma); GO enrichment|
 
 ## Software
 R [4.5.0]. Main packages: limma, WGCNA, glmnet, pROC, lme4, lmerTest, clusterProfiler,
