@@ -1,3 +1,32 @@
+# =============================================================================
+# 09_mouse_urine_DAP.R
+# Differential abundance and GO/KEGG enrichment of urine proteins
+#
+# Manuscript: "Integrated Biofluid Proteomics Identified Dynamic Functional
+#              Biomarkers of LRRK2-Linked Parkinson's Disease Progression"
+#
+# For each comparison in COMPARISONS:
+#   1. PCA of all samples (quality control)
+#   2. limma: abundance ~ group; empirical Bayes moderated t test;
+#      Benjamini-Hochberg FDR
+#   3. Differentially abundant proteins (DAPs):
+#      FDR/p-value < 0.05 and |log2FC| > 1.5 x SD of all log2FC in that comparison
+#   4. Volcano plot
+#   5. GO (BP, CC, MF) and KEGG over-representation for down- and
+#      up-regulated DAPs
+#
+# Input : ./The mouse urine proteomic data 70% filtered, log2 transferred, normal dis imputation.csv
+#           (protein-group abundances that were log2-transformed, filtered (detected in >70% of samples) and
+#           imputed from a normal distribution in Perseus; see Methods)
+#          ./Phenotype.txt
+# Output: results/urine/<comparison>/
+# =============================================================================
+
+
+
+
+
+
 library(WGCNA)
 library(DESeq2)
 library(GEOquery)
