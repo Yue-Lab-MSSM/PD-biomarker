@@ -20,8 +20,8 @@ set.seed(23)
 # =========================
 # 1. FILE PATHS
 # =========================
-ppmi_file <- "../Working_file_ppmi_project_151 with phenotypes.csv"
-lcc_file  <- "../The LCC CSF proteomics data.csv"
+ppmi_file <- "./ppmi_project_151.csv"
+lcc_file  <- "./The LCC CSF proteomics data.csv"
 
 outdir <- "./"
 dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
