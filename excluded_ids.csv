@@ -1,0 +1,12 @@
+﻿CSF comparisons,the excluded ids
+LRRK2 PD vs. HC,"to_remove <- c('4104','3805','3768','3351','3519','40707','58671','3806','41295', '50319','3362')"
+LRRK2 PD vs. LRRK2 NMC,"to_remove <- c('54266', '59869', '50225')"
+LRRK2 NMC vs. HC,"to_remove <- c('54266', '59869', '50225','4104', '3805', '3768')"
+sporadic PD vs. HC,"to_remove <- c('4104','3805','3768','3351','3519','3362','3806','4111',  '4001', '3059','3126')"
+GBA PD vs. HC,"to_remove <- c('4104','3805','3768','3351','3519','3362','3806', '54265')"
+GBA PD vs. GBA NMC,"to_remove <- c('70378','52888')"
+LRRK2 SAA + vs. LRRK2 SAA -,"to_remove <- c('58671','50319','41295','40707', '41749', '50746')"
+GBA SAA + vs. GBA SAA -,"to_remove <- c('70326','3226')"
+GBA PD vs. sporadic PD,"to_remove <- c('4111','4001', '3126', '3333','3552')"
+LRRK2 PD vs. sporadic,none
+GBA NMC vs. HC,"to_remove <- c('70378','52888','4104','3805','3768','52888')"
