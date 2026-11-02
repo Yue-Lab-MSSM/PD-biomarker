@@ -1,30 +1,34 @@
 # =============================================================================
-# 09_mouse_urine_DAP.R
-# Differential abundance and GO/KEGG enrichment of urine proteins
+# 10_mouse_urine_WGCNA.R
+# Weighted gene co-expression network analysis (WGCNA) of urine proteins
 #
 # Manuscript: "Integrated Biofluid Proteomics Identified Dynamic Functional
 #              Biomarkers of LRRK2-Linked Parkinson's Disease Progression"
 #
-# For each comparison in COMPARISONS:
-#   1. PCA of all samples (quality control)
-#   2. limma: abundance ~ group; empirical Bayes moderated t test;
-#      Benjamini-Hochberg FDR
-#   3. Differentially abundant proteins (DAPs):
-#      FDR/p-value < 0.05 and |log2FC| > 1.5 x SD of all log2FC in that comparison
-#   4. Volcano plot
-#   5. GO (BP, CC, MF) and KEGG over-representation for down- and
-#      up-regulated DAPs
+# Steps
+#   1. Load data, define groups
+#   2. Load traits data and Quality control: remove poor proteins/samples and outlier samples
+#      (hierarchical clustering of samples, tree cut at height 40)
+#   3. Choose the soft-thresholding power (scale-free topology)
+#   4. WGCNA construction and detect modules (blockwiseModules)
+#   5. Clustering dendrograms for peptides
+#   6. Modules analysis
+#   7. Peptide significance caculation
+#   8. Module-trait relationships
+#   9. Correlated eigenpeptide in modules associated with traits
+#   10. WGCNA results Output
+#   11. Network heatmap plot visulization
+#   12. Exporting Network to external visualization software
+#   13. Exporting top hub Network to external visualization software (cytoscope)
+#   14. Module membership vs. peptide significance
+#   15. GO TERM and KEGG analysis
 #
 # Input : ./The mouse urine proteomic data 70% filtered, log2 transferred, normal dis imputation.csv
 #           (protein-group abundances that were log2-transformed, filtered (detected in >70% of samples) and
 #           imputed from a normal distribution in Perseus; see Methods)
 #          ./Phenotype.txt
-# Output: results/urine/<comparison>/
+# Output: results/WGCNA/
 # =============================================================================
-
-
-
-
 
 
 library(WGCNA)
