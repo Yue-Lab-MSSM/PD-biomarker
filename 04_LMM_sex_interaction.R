@@ -1,3 +1,43 @@
+# =============================================================================
+# 04_CSF_longitudinal_LMM.R
+# Longitudinal analysis of CSF proteins in LRRK2 PD and healthy controls by
+# linear mixed-effects models (PPMI Project 177, mass spectrometry),
+# run separately in males and females
+#
+# Manuscript: "Integrated Biofluid Proteomics Identified Dynamic Functional
+#              Biomarkers of LRRK2-Linked Parkinson's Disease Progression"
+#
+# Steps (run once for males, SexM1.F0 == 1, and once for females, SexM1.F0 == 0):
+#   1. Select HC and LRRK2 PD (PD_LRRK2); time = years since baseline
+#      (onset_EVENT_ID); log2(x + 1) transform of protein abundances;
+#      age at visit centred
+#   2. PCA (after missMDA EM imputation, for quality control only) and removal
+#      of outlier samples/participants listed in the exclusion file
+#   3. For each protein, a linear mixed-effects model (lme4/lmerTest):
+#        protein ~ group + time + group:time [+ age] + (1 + time | participant)
+#      - random slope replaced by random intercept if the fit is singular
+#        or fails
+#      - age kept or dropped by AIC (maximum likelihood)
+#      - chosen model refitted by REML; P values by Satterthwaite t tests
+#   4. Volcano plots of the baseline group difference (LRRK2 PD vs HC), the
+#      difference in slope (group x time) and the HC slope (time)
+#   5. Trajectory plots (observed data + model fit) for selected proteins
+#   6. Association with motor severity (MDS-UPDRS III) for selected proteins:
+#        UPDRS-III ~ protein x group x time + age + random effects
+#      tested by likelihood-ratio tests (afex::mixed), with model diagnostics
+#      (residuals vs fitted, Q-Q plot of random effects, spaghetti plots)
+#
+# Input : data/project_177_csf.csv
+#           (one row per sample: phenotypes and P177_CSF_* protein columns)
+#         data/excluded_ids.csv
+#           (participants/samples excluded as outliers. Not distributed,
+#            because PPMI does not allow participant IDs to be shared;
+#            see README and Methods for the exclusion rules)
+# Output: results/CSF_longitudinal/<sex>/
+#           AIC comparisons, REML model summaries, volcano plots,
+#           trajectory and diagnostic plots
+# =============================================================================
+
 library(lme4)
 library(tidyverse)
 library(afex)
@@ -63,13 +103,6 @@ protein_cols <- grep("^P177_CSF_", names(long_df), value = TRUE)
 # Apply log2 transformation to all protein columns
 long_df <- long_df %>%
   mutate(across(all_of(protein_cols), ~ log2(. + 1), .names = "{.col}"))
-
-
-
-######################################
-#long_df <- long_df[!(long_df$PATNO %in% c(" ")), ]  #One participant is a outlier, as it shows >2SD of intercept for many proteins, because of the PPMI policy, we can not show the participant ID
-#######################################
-
 
 # Verify the transformation by checking a few rows
 head(long_df[, c("PATNO", "time", protein_cols[1:3])])
