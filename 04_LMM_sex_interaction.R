@@ -1,41 +1,32 @@
 # =============================================================================
-# 04_CSF_longitudinal_LMM.R
+# 04_CSF_LMM_sex_interaction.R
 # Longitudinal analysis of CSF proteins in LRRK2 PD and healthy controls by
-# linear mixed-effects models (PPMI Project 177, mass spectrometry),
-# run separately in males and females
+# linear mixed-effects models with a group x time x sex interaction
+# (PPMI Project 177, mass spectrometry)
 #
 # Manuscript: "Integrated Biofluid Proteomics Identified Dynamic Functional
 #              Biomarkers of LRRK2-Linked Parkinson's Disease Progression"
 #
-# Steps (run once for males, SexM1.F0 == 1, and once for females, SexM1.F0 == 0):
+# Steps:
 #   1. Select HC and LRRK2 PD (PD_LRRK2); time = years since baseline
 #      (onset_EVENT_ID); log2(x + 1) transform of protein abundances;
-#      age at visit centred
-#   2. PCA (after missMDA EM imputation, for quality control only) and removal
-#      of outlier samples/participants listed in the exclusion file
-#   3. For each protein, a linear mixed-effects model (lme4/lmerTest):
-#        protein ~ group + time + group:time [+ age] + (1 + time | participant)
-#      - random slope replaced by random intercept if the fit is singular
-#        or fails
-#      - age kept or dropped by AIC (maximum likelihood)
-#      - chosen model refitted by REML; P values by Satterthwaite t tests
-#   4. Volcano plots of the baseline group difference (LRRK2 PD vs HC), the
-#      difference in slope (group x time) and the HC slope (time)
-#   5. Trajectory plots (observed data + model fit) for selected proteins
-#   6. Association with motor severity (MDS-UPDRS III) for selected proteins:
-#        UPDRS-III ~ protein x group x time + age + random effects
-#      tested by likelihood-ratio tests (afex::mixed), with model diagnostics
-#      (residuals vs fitted, Q-Q plot of random effects, spaghetti plots)
+#      age at enrollment centred; sex coded as a factor (Female = reference)
+#   2. PCA (after missMDA EM imputation) for quality control
+#   3. For each protein, a linear mixed-effects model (lme4/lmerTest, REML):
+#        protein ~ group * time * sex + age + (1 + time | participant)
+#      P values by Satterthwaite t tests; Benjamini-Hochberg FDR across
+#      proteins for each fixed-effect term
+#   4. Volcano plots of the baseline group difference (LRRK2 PD vs HC) and
+#      the difference in slope (group x time), using nominal P values
+#   5. For selected proteins: observed data with model-fitted trajectories,
+#      model diagnostics (residuals vs fitted, Q-Q plot of random effects),
+#      predicted trajectories with 95% CIs, and spaghetti plots
 #
-# Input : data/project_177_csf.csv
+# Input : data/Working_file_ppmi_project_177_csf.csv
 #           (one row per sample: phenotypes and P177_CSF_* protein columns)
-#         data/excluded_ids.csv
-#           (participants/samples excluded as outliers. Not distributed,
-#            because PPMI does not allow participant IDs to be shared;
-#            see README and Methods for the exclusion rules)
-# Output: results/CSF_longitudinal/<sex>/
-#           AIC comparisons, REML model summaries, volcano plots,
-#           trajectory and diagnostic plots
+# Output: per-protein model details; fixed effects, random effects and
+#         FDR-corrected results for all proteins; volcano plots;
+#         trajectory and diagnostic plots
 # =============================================================================
 
 library(lme4)
@@ -43,10 +34,7 @@ library(tidyverse)
 library(afex)
 library(dplyr)
 # Example data preparation (replace with your actual data loading)
-df <- read.csv("project_177_csf without ST_with years after onset.csv")
-df <- df %>% filter(SexM1.F0 == 1)
-#df <- df %>% filter(SexM1.F0 == 1 & EVENT_ID <= 5)
-
+df <- read.csv("Working_file_ppmi_project_177_csf without ST_with years after onset.csv")
 
 df$time <- df$onset_EVENT_ID
 # Check for unmapped EVENT_ID values
@@ -57,8 +45,6 @@ if (any(is.na(df$time))) {
 # View the first few rows to confirm
 head(df[, c("PATNO", "onset_EVENT_ID", "time")])
 
-
-####Count Unique Time Points per Participant >2
 # Step 1: Count the number of unique time points per PATNO
 visit_counts <- df %>%
   group_by(PATNO) %>%
@@ -82,7 +68,6 @@ visit_counts_filtered <- df %>%
 print(visit_counts_filtered)
 
 
-
 # Define group labels (example)
 df <- df %>%
   mutate(group_label = case_when(
@@ -92,10 +77,8 @@ df <- df %>%
   ))
 
 
-
-
 # Filter for relevant groups
-long_df <- df %>% filter(group_label %in% c("HC", "PD_LRRK2"))
+long_df <- df %>% filter(group_label %in% c("HC", "PD_LRRK2")) #for LRRK2_NMC, change the name here
 
 # Identify protein columns (adjust the pattern based on your column names)
 protein_cols <- grep("^P177_CSF_", names(long_df), value = TRUE)
@@ -142,166 +125,186 @@ ggplot(pc_df, aes(x = PC1, y = PC2, color = Group)) +
        x = "PC1", y = "PC2") +
   theme_minimal()
 
-
-
 # 2. Inspect age distribution
-summary(long_df$envolved.age)
+summary(long_df$ENROLL_AGE)
 
-table(long_df$Group)
+# 3. Mean‐center ENROLL_AGE
+long_df$ENROLL_AGE_c <- long_df$ENROLL_AGE - mean(long_df$ENROLL_AGE, na.rm = TRUE)
 
-long_df %>%
-  distinct(PATNO, group_label) %>%
-  count(group_label)
+# 4. Re‐code Sex as factor
+#    assuming SexM1.F0 is coded 1 = male, 0 = female
+long_df$Sex <- factor(long_df$SexM1.F0,
+                      levels = c(0, 1),
+                      labels = c("Female", "Male"))
 
-# 3. Mean‐center envolved.age
-long_df$envolved.age_c <- long_df$envolved.age - mean(long_df$envolved.age, na.rm = TRUE)
 
-
+####Generate the values for all the proteins together.
 library(lme4)
 library(lmerTest)
 library(dplyr)
 
-# Containers
-all_AICs      <- list()
-all_summaries <- list()
+# Initialize a list to store results for each protein
+results <- list()
+model_details <- list()
 
-# 1. Model selection (ML) & record AICs
+# === 1. Fit models & collect results ===
 for (protein in protein_cols) {
-  
-  # Define candidate formulas (as before)
-  formula_reduced_slope <- as.formula(
-    paste0("`", protein, "` ~ 1 + group_label + time + group_label:time + (1 + time | PATNO)")
+  # Build the model formula
+  formula_str <- paste0(
+    protein,
+    " ~ 1 + group_label + time + Sex",
+    " + group_label:time + time:Sex + group_label:Sex",
+    " + group_label:time:Sex + ENROLL_AGE_c",
+    " + (1 + time | PATNO)"
   )
-  formula_reduced_non_random <- as.formula(
-    paste0("`", protein, "` ~ 1 + group_label + time + group_label:time + (1 | PATNO)")
+  model <- lmer(
+    as.formula(formula_str),
+    data    = long_df,
+    control = lmerControl(optimizer = "bobyqa")
   )
-  formula_full_slope <- as.formula(
-    paste0("`", protein, "` ~ 1 + group_label + time + group_label:time + envolved.age_c + (1 + time | PATNO)")
-  )
-  formula_full_non_random <- as.formula(
-    paste0("`", protein, "` ~ 1 + group_label + time + group_label:time + envolved.age_c + (1 | PATNO)")
-  )
+  sm <- summary(model)
   
-  # 1a. Fit A2 (slope) under ML
-  fit_reduced_slope_ml <- tryCatch(
-    lmer(formula_reduced_slope, data = long_df, REML = FALSE,
-         control = lmerControl(optimizer = "bobyqa")),
-    error = function(e) e
-  )
-  if (inherits(fit_reduced_slope_ml, "error") || isSingular(fit_reduced_slope_ml, tol = 1e-4)) {
-    fit_A_final_ml <- tryCatch(
-      lmer(formula_reduced_non_random, data = long_df, REML = FALSE,
-           control = lmerControl(optimizer = "bobyqa")),
-      error = function(e) e
-    )
-    reason_A <- if (inherits(fit_reduced_slope_ml, "error")) "error_reduced_slope_REML"
-    else paste0("reduced_slope_non_random_REML")
-  } else {
-    fit_A_final_ml <- fit_reduced_slope_ml
-    reason_A <- "reduced_slope_REML"
-  }
-  if (!inherits(fit_A_final_ml, "error") && isSingular(fit_A_final_ml, tol = 1e-4)) {
-    reason_A <- paste0(reason_A, "_reduced_non_random_REML")
-  }
+  # Helper to safely extract estimate/p-value
+  getEst <- function(term) tryCatch(sm$coefficients[term, "Estimate"], error = function(e) NA)
+  getP   <- function(term) tryCatch(sm$coefficients[term, "Pr(>|t|)"], error = function(e) NA)
   
-  # 1b. Fit B2 (full) under ML
-  fit_full_slope_ml <- tryCatch(
-    lmer(formula_full_slope, data = long_df, REML = FALSE,
-         control = lmerControl(optimizer = "bobyqa")),
-    error = function(e) e
-  )
-  if (inherits(fit_full_slope_ml, "error") || isSingular(fit_full_slope_ml, tol = 1e-4)) {
-    fit_full_final_ml <- tryCatch(
-      lmer(formula_full_non_random, data = long_df, REML = FALSE,
-           control = lmerControl(optimizer = "bobyqa")),
-      error = function(e) e
-    )
-    reason_full <- if (inherits(fit_full_slope_ml, "error")) "error_full_slope_REML"
-    else paste0("full_slope_non_random_REML")
-  } else {
-    fit_full_final_ml <- fit_full_slope_ml
-    reason_full <- "full_slope_REML"
-  }
-  if (!inherits(fit_full_final_ml, "error") && isSingular(fit_full_final_ml, tol = 1e-4)) {
-    reason_full <- paste0(reason_full, "_full_non_random_REML")
-  }
-  
-  # 1c. If both fail, skip
-  if (inherits(fit_A_final_ml, "error") && inherits(fit_full_final_ml, "error")) {
-    warning("Protein '", protein, "' could not be fitted under REML.")
-    next
-  }
-  
-  # 1d. Record AICs (for comparison under ML)
-  AIC_A_ml    <- if (!inherits(fit_A_final_ml, "error"))    AIC(fit_A_final_ml)    else Inf
-  AIC_full_ml <- if (!inherits(fit_full_final_ml, "error")) AIC(fit_full_final_ml) else Inf
-  
-  if (AIC_full_ml < AIC_A_ml) {
-    chosen_model_ml       <- fit_full_final_ml
-    chosen_fixed_spec_ml  <- "with_envolved.age_c"
-    chosen_random_ml      <- reason_full
-  } else {
-    chosen_model_ml       <- fit_A_final_ml
-    chosen_fixed_spec_ml  <- "without_envolved.age_c"
-    chosen_random_ml      <- reason_A
-  }
-  
-  all_AICs[[protein]] <- data.frame(
-    protein            = protein,
-    AIC_without_ENROLL = AIC_A_ml,
-    AIC_with_ENROLL    = AIC_full_ml,
-    chosen_fixed_ml    = chosen_fixed_spec_ml,
-    chosen_random_ml   = chosen_random_ml,
-    stringsAsFactors   = FALSE
-  )
-  
-  
-  # 2. Refit the chosen model under REML for final estimates
-  #    We extract the formula from the ML‐fit object and simply set REML = TRUE
-  best_formula <- formula(chosen_model_ml)
-  fit_reml_final <- update(chosen_model_ml, REML = TRUE)
-  
-  # 2a. Store the summary of the REML‐fit
-  summ_reml <- summary(fit_reml_final)
-  coef_mat  <- summ_reml$coefficients
-  
-  capture.output(
-    summ_reml,
-    file = paste0(
-      protein,
-      "_summary_of_fix_effect_random.txt"))
-  
-  
-  # 2b. Extract relevant fields (adjust as needed)
-  summary_row <- data.frame(
+  # Store key fixed effects + REML
+  results[[protein]] <- tibble(
     protein                  = protein,
-    chosen_fixed_REML        = chosen_fixed_spec_ml,
-    chosen_random_REML       = chosen_random_ml,
-    est_group_labelHC_REML   = if("(Intercept)"   %in% rownames(coef_mat)) coef_mat["(Intercept)",   "Estimate"] else NA,
-    pval_group_labelHC_REML  = if("(Intercept)"   %in% rownames(coef_mat)) coef_mat["(Intercept)",   "Pr(>|t|)"]  else NA,
-    est_time_REML            = if("time"             %in% rownames(coef_mat)) coef_mat["time",             "Estimate"] else NA,
-    pval_time_REML           = if("time"             %in% rownames(coef_mat)) coef_mat["time",             "Pr(>|t|)"]  else NA,
-    est_group_PD_LRRK2_REML  = if("group_labelPD_LRRK2" %in% rownames(coef_mat)) coef_mat["group_labelPD_LRRK2", "Estimate"] else NA,
-    pval_group_PD_LRRK2_REML = if("group_labelPD_LRRK2" %in% rownames(coef_mat)) coef_mat["group_labelPD_LRRK2", "Pr(>|t|)"]  else NA,
-    est_group_labelPD_LRRK2_time_REML     = if("group_labelPD_LRRK2:time" %in% rownames(coef_mat)) coef_mat["group_labelPD_LRRK2:time", "Estimate"] else NA,
-    pval_group_labelPD_LRRK2_time_REML    = if("group_labelPD_LRRK2:time" %in% rownames(coef_mat)) coef_mat["group_labelPD_LRRK2:time", "Pr(>|t|)"]  else NA,
-    est_envolved.age_c_REML    = if("envolved.age_c"     %in% rownames(coef_mat)) coef_mat["envolved.age_c",     "Estimate"] else NA,
-    pval_envolved.age_c_REML   = if("envolved.age_c"     %in% rownames(coef_mat)) coef_mat["envolved.age_c",     "Pr(>|t|)"]  else NA,
-    var_PATNO_REML           = as.data.frame(summ_reml$varcor)$vcov[1],
-    sd_PATNO_REML            = as.data.frame(summ_reml$varcor)$sdcor[1],
-    n_obs_REML               = summ_reml$devcomp$dims["n"],
-    n_groups_REML            = summ_reml$ngrps[["PATNO"]],
-    stringsAsFactors         = FALSE
+    coef_group_HC            = getEst("group_labelHC"),
+    p_group_HC               = getP("group_labelHC"),
+    coef_group_PD_LRRK2      = getEst("group_labelPD_LRRK2"),
+    p_group_PD_LRRK2         = getP("group_labelPD_LRRK2"),
+    coef_time                = getEst("time"),
+    p_time                   = getP("time"),
+    coef_SexMale             = getEst("SexMale"),
+    p_SexMale                = getP("SexMale"),
+    coef_gl_time             = getEst("group_labelPD_LRRK2:time"),
+    p_gl_time                = getP("group_labelPD_LRRK2:time"),
+    coef_time_Sex            = getEst("time:SexMale"),
+    p_time_Sex               = getP("time:SexMale"),
+    coef_gl_Sex              = getEst("group_labelPD_LRRK2:SexMale"),
+    p_gl_Sex                 = getP("group_labelPD_LRRK2:SexMale"),
+    coef_three_way           = getEst("group_labelPD_LRRK2:time:SexMale"),
+    p_three_way              = getP("group_labelPD_LRRK2:time:SexMale"),
+    coef_ENROLL_AGE_c        = getEst("ENROLL_AGE_c"),
+    p_ENROLL_AGE_c           = getP("ENROLL_AGE_c"),
+    REML                     = sm$devcomp$cmp["REML"]
   )
-  all_summaries[[protein]] <- summary_row
-}  
+  
+  # Scaled residuals
+  res_qs <- quantile(residuals(model), probs = c(0, .25, .5, .75, 1))
+  # Random effects table
+  rand_eff <- as.data.frame(VarCorr(model)) %>%
+    transmute(
+      grp      = grp,
+      term     = if_else(is.na(var1), "(Intercept)", var1),
+      variance = vcov,
+      stddev   = sdcor
+    )
+  
+  # Save detailed pieces
+  model_details[[protein]] <- list(
+    protein          = protein,
+    reml_criterion   = sm$devcomp$cmp["REML"],
+    n_obs            = sm$devcomp$dims["n"],
+    n_groups         = sm$ngrps[["PATNO"]],
+    scaled_residuals = res_qs,
+    random_effects   = rand_eff,
+    fixed_effects    = as.data.frame(sm$coefficients) %>%
+      rownames_to_column("term") %>%
+      rename(
+        Estimate  = "Estimate",
+        Std_Error = "Std. Error",
+        DF        = "df",
+        T_Value   = "t value",
+        P_Value   = "Pr(>|t|)"
+      )
+  )
+}
 
-# 3. Combine everything at the end and write CSVs
-df_AICs      <- bind_rows(all_AICs)
-df_summaries <- bind_rows(all_summaries)
+# === 2. Assemble & FDR-correct ===
+results_df <- bind_rows(results) %>%
+  mutate(
+    fdr_group_HC       = p.adjust(p_group_HC,             method = "fdr"),
+    fdr_group_PD_LRRK2 = p.adjust(p_group_PD_LRRK2,      method = "fdr"),
+    fdr_time           = p.adjust(p_time,                method = "fdr"),
+    fdr_Sex            = p.adjust(p_SexMale,             method = "fdr"),
+    fdr_gl_time        = p.adjust(p_gl_time,             method = "fdr"),
+    fdr_time_Sex       = p.adjust(p_time_Sex,            method = "fdr"),
+    fdr_gl_Sex         = p.adjust(p_gl_Sex,              method = "fdr"),
+    fdr_three_way      = p.adjust(p_three_way,           method = "fdr"),
+    fdr_ENROLL_AGE     = p.adjust(p_ENROLL_AGE_c,        method = "fdr")
+  )
 
-write.csv(df_AICs,      "all_proteins_AIC_comparisons_ML.csv",    row.names = FALSE)
-write.csv(df_summaries, "all_proteins_model_summaries_REML.csv", row.names = FALSE)
+# Identify any proteins with at least one FDR < .05
+significant_proteins <- filter(
+  results_df,
+  if_any(starts_with("fdr_"), ~ . < 0.05)
+)
+
+# === 3. Write CSV outputs ===
+# 3.1 Summary results
+write.csv(results_df,             "fdr_results_all_proteins.csv",  row.names = FALSE)
+write.csv(significant_proteins,   "significant_proteins.csv",      row.names = FALSE)
+
+# 3.2 Per-protein detailed CSVs
+for (protein in names(model_details)) {
+  det <- model_details[[protein]]
+  
+  # A. Model summary
+  summary_df <- tibble(
+    Protein          = det$protein,
+    REML_Criterion   = det$reml_criterion,
+    Num_Observations = det$n_obs,
+    Num_Groups       = det$n_groups
+  )
+  # B. Residuals
+  resid_df <- as.data.frame(t(det$scaled_residuals)) %>%
+    setNames(paste0("Scaled_Residual_", names(det$scaled_residuals)))
+  # C. Random effects
+  rand_df <- det$random_effects
+  # D. Fixed effects
+  fix_df  <- det$fixed_effects
+  
+  # Combine into one multi‐section CSV
+  sink(paste0("model_details_", protein, ".csv"))
+  cat("=== Model_Summary ===\n")
+  write.csv(summary_df, row.names = FALSE)
+  cat("\n=== Scaled_Residuals ===\n")
+  write.csv(resid_df,    row.names = FALSE)
+  cat("\n=== Random_Effects ===\n")
+  write.csv(rand_df,     row.names = FALSE)
+  cat("\n=== Fixed_Effects ===\n")
+  write.csv(fix_df,      row.names = FALSE)
+  sink()
+}
+
+# 3.3 Combined details across all proteins
+all_summaries   <- bind_rows(lapply(model_details, function(x) {
+  tibble(
+    Protein          = x$protein,
+    REML_Criterion   = x$reml_criterion,
+    Num_Observations = x$n_obs,
+    Num_Groups       = x$n_groups
+  )
+}))
+all_residuals   <- bind_rows(lapply(model_details, function(x) {
+  as.data.frame(t(x$scaled_residuals)) %>%
+    setNames(paste0("Scaled_Residual_", names(x$scaled_residuals))) %>%
+    mutate(Protein = x$protein)
+}))
+all_random      <- bind_rows(lapply(model_details, function(x) {
+  mutate(x$random_effects, Protein = x$protein)
+}))
+all_fixed       <- bind_rows(lapply(model_details, function(x) {
+  mutate(x$fixed_effects,  Protein = x$protein)
+}))
+
+write.csv(all_summaries, "all_proteins_model_summary.csv",   row.names = FALSE)
+write.csv(all_residuals, "all_proteins_scaled_residuals.csv", row.names = FALSE)
+write.csv(all_random,    "all_proteins_random_effects.csv",   row.names = FALSE)
+write.csv(all_fixed,     "all_proteins_fixed_effects.csv",    row.names = FALSE)
 
 
 ##Volcano Plot of Effect Sizes
@@ -309,26 +312,15 @@ library(EnhancedVolcano)
 
 library(dplyr)
 
-df_summaries <- bind_rows(all_summaries)
-volcano_df <- df_summaries %>%
-  # Keep only proteins for which `est_group_PD_LRRK2_REML` is not NA:
-  filter(!is.na(est_group_PD_LRRK2_REML) & !is.na(pval_group_PD_LRRK2_REML)) %>%
-  select(
-    Protein  = protein,
-    log2FC   = est_group_PD_LRRK2_REML,
-    pvalue   = pval_group_PD_LRRK2_REML
-  ) %>%
-  # (Optional) If your protein column has a prefix like "P177_CSF_", remove it:
-  mutate(
-    Protein = sub("^([^_]*_){2}", "", Protein)  # keep text after second underscore
-  ) %>%
-  # Precompute –log10(pvalue)
-  mutate(
-    negLog10P = -log10(pvalue)
-  )# handy to precompute
+# fixed_effects_all has columns: Protein, term, estimate, p_value, etc.
+volcano_df <- all_fixed %>%
+  filter(term == "group_labelPD_LRRK2") %>%      # keep only LRRK2 effect
+  select(Protein, log2FC = estimate, pvalue = p_value) %>%
+  mutate(Protein = sub("^([^_]*_){2}", "", Protein),  #only get the text after the second "_"
+         negLog10P = -log10(pvalue))              # handy to precompute
 
 
-pdf("The volcano plot of BL_FC and p value for PB.pdf",7.5,4.5)
+pdf("The volcano plot of BL_FC and p value with p value.pdf",6,6)
 EnhancedVolcano(volcano_df,
                 #selectLab = " ",
                 lab           = volcano_df$Protein,               # name of the column with labels
@@ -340,268 +332,322 @@ EnhancedVolcano(volcano_df,
                 FCcutoff      = 0.1,
                 xlim = c(-0.5,0.5),
                 ylim = c(0,2),
-                legendLabels=c('NS','Log2FC','pvalue','Log2FC & pvalue'),
                 gridlines.major = F, gridlines.minor = F,
-                pointSize = 1,
-                legendPosition = "right",
-                legendLabSize = 14,
-                legendIconSize = 2,
-                legendDropLevels = F,
-                #colAlpha = 0.5,
-                drawConnectors = T, min.segment.length = 0.0001, 
-                selectLab = c("CTSB", "CTSD", "NPC2", "PSAP", "ICOSLG", "B2M", "SERPING1", "CD14",
-                              "CLU","COL6A1","LAMP2","TGFBI","EFEMP1", "FBLN5","APOE", "FN1", "CSF1R", "CHI3L1"),
-                title = NULL,subtitle = "LRRK2_PD vs. HC male",
-                max.overlaps = 10
+                min.segment.length = 0.0001,
+                pointSize = 1.0,
+                labSize = 5.0,
+                col = c("grey30", "forestgreen", "royalblue", "red2"),
+                colAlpha = 1,
+                legendLabels=c('NS','Log2FC','pvalue','Log2FC & pvalue'),
+                legendPosition = 'top',
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                max.overlaps = 30,
+                # blank‐out the default labels:
+                #title    = "",      # no main title
+                subtitle = "",      # no subtitle
+                #caption  = " "       # no caption (if you want)
 )
 
 dev.off()
 
 
-volcano_df1 <- df_summaries %>%
-  filter(!is.na(est_group_labelPD_LRRK2_time_REML) & !is.na(pval_group_labelPD_LRRK2_time_REML)) %>%
-  select(
-    Protein  = protein,
-    log2FC   = est_group_labelPD_LRRK2_time_REML,
-    pvalue   = pval_group_labelPD_LRRK2_time_REML
-  ) %>%
-  # (Optional) If your protein column has a prefix like "P177_CSF_", remove it:
-  mutate(
-    Protein = sub("^([^_]*_){2}", "", Protein)  # keep text after second underscore
-  ) %>%
-  # Precompute –log10(pvalue)
-  mutate(
-    negLog10P = -log10(pvalue)
-  )# handy to precompute
+
+# fixed_effects_all has columns: Protein, term, estimate, p_value, etc.
+volcano_df1 <- all_fixed %>%
+  filter(term == "group_labelPD_LRRK2:time") %>%      # keep only LRRK2 effect
+  select(Protein, log2FC = estimate, pvalue = p_value) %>%
+  mutate(Protein = sub("^([^_]*_){2}", "", Protein),  #only get the text after the second "_"
+         negLog10P = -log10(pvalue))              # handy to precompute
 
 
-
-pdf("The volcano plot of disease slope_change and p value for PB.pdf",7.5,4.5)
+pdf("The volcano plot of slop_change and p value.pdf",6,6)
 EnhancedVolcano(volcano_df1,
+                #selectLab = " ",
                 lab           = volcano_df1$Protein,               # name of the column with labels
                 x             = 'log2FC',       # the log₂FC column
                 y             = 'pvalue',    # the p-value column
-                xlab          = bquote(~"Disease_Slope_Change"),
+                xlab          = bquote(~"Slop_Change"),
                 ylab          = bquote(~-Log[10]~italic(P)),
-                pCutoff       = 0.05,                     # raw p-value cutoff
-                FCcutoff      = 0.01,
-                legendLabels=c('NS','Log2FC','pvalue','Log2FC & pvalue'),
-                gridlines.major = F, gridlines.minor = F,
-                xlim = c(-0.1,0.1),
-                ylim = c(0,3),
-                pointSize = 1,
-                legendPosition = "right",
-                legendLabSize = 14,
-                legendIconSize = 2,
-                legendDropLevels = F,
-                colAlpha = 0.5,
-                drawConnectors = T, min.segment.length = 0.0001, 
-                selectLab = c("CTSB", "CTSD", "NPC2", "PSAP", "ICOSLG", "B2M", "SERPING1", "CD14",
-                              "CLU","COL6A1","LAMP2","TGFBI","EFEMP1", "FBLN5","APOE", "FN1", "CSF1R", "CHI3L1"),
-                title = NULL,subtitle = "LRRK2_PD vs. HC male",
-                max.overlaps = 10
-)
-
-
-dev.off()
-
-
-volcano_df2 <- df_summaries %>%
-  filter(!is.na(est_time_REML) & !is.na(pval_time_REML)) %>%
-  select(
-    Protein  = protein,
-    log2FC   = est_time_REML,
-    pvalue   = pval_time_REML
-  ) %>%
-  # (Optional) If your protein column has a prefix like "P177_CSF_", remove it:
-  mutate(
-    Protein = sub("^([^_]*_){2}", "", Protein)  # keep text after second underscore
-  ) %>%
-  # Precompute –log10(pvalue)
-  mutate(
-    negLog10P = -log10(pvalue)
-  )# handy to precompute
-
-
-pdf("The volcano plot of HC slope_change and p value for PB.pdf",7.5,4.5)
-EnhancedVolcano(volcano_df2,
-                #selectLab = " ",
-                lab           = volcano_df2$Protein,               # name of the column with labels
-                x             = 'log2FC',       # the log₂FC column
-                y             = 'pvalue',    # the p-value column
-                xlab          = bquote(~"HC Slope_Change"),
-                ylab          = bquote(~-Log[10]~italic(P)),
-                pCutoff       = 0.05,                     # raw p-value cutoff
+                pCutoff       = 0.1,                     # raw p-value cutoff
                 FCcutoff      = 0.01,
                 xlim = c(-0.1,0.1),
                 ylim = c(0,2),
-                legendLabels=c('NS','Log2FC','pvalue','Log2FC & pvalue'),
                 gridlines.major = F, gridlines.minor = F,
-                pointSize = 1,
-                legendPosition = "right",
-                legendLabSize = 14,
-                legendIconSize = 2,
-                legendDropLevels = F,
-                #colAlpha = 0.5,
-                drawConnectors = T, min.segment.length = 0.0001, 
-                selectLab = c(" "),
-                title = NULL,subtitle = "LRRK2_PD vs. HC male",
-                max.overlaps = 10
+                min.segment.length = 0.0001,
+                pointSize = 1.0,
+                labSize = 5.0,
+                col = c("grey30", "forestgreen", "royalblue", "red2"),
+                colAlpha = 1,
+                legendLabels=c('NS','Log2FC','pvalue','Log2FC & pvalue'),
+                legendPosition = 'top',
+                drawConnectors = TRUE,
+                widthConnectors = 0.5,
+                max.overlaps = 30,
+                # blank‐out the default labels:
+                #title    = "",      # no main title
+                subtitle = "",      # no subtitle
+                #caption  = " "       # no caption (if you want)
 )
 
 dev.off()
-
-
-
-
 
 library(ggplot2)
 library(lattice)
 library(ggeffects)
 library(effects)
-library(broom)    # for tidy()
-library(dplyr)
-library(ggplot2)
-library(rlang)
-library(broom.mixed)
 # 1. Ensure Group is a factor
 
 long_df$group_label <- factor(long_df$group_label)
 
 
-protein_name <- c("CTSD","LAMP2","GM2A","CLU","CD14","B2M","EFEMP1","APOE","FN1","NPC2","PSAP","CTSB",
-                  "ICOSLG","SERPING1","CSF1R","CHI3L1","TGFBI","FBLN5")
-proteins  <- paste0("P177_CSF_", protein_name)
+protein_name <- "CTSD" #change to the proteins you are interested in
+response_var  <- paste0("P177_CSF_", protein_name)
 
 # 2. Fit by REML
-for (response_var in proteins)  {
+
+# build a one-off formula string and convert to a formula object
+
+fml <- as.formula(
+  paste0(
+    response_var,
+    " ~ 1 + group_label + time + Sex + group_label:time +  
+    time:Sex + group_label:Sex + group_label:time:Sex + ENROLL_AGE_c + (1+time|PATNO)"
+  )
+)
+
+m_reml <- lmer(
+  formula = fml,
+  data    = long_df, 
+  control = lmerControl(optimizer = "bobyqa")
+)
+
+summary(m_reml)
+
+#  3. Build a prediction grid
+pred_df <- expand.grid(
+  time  = seq(min(long_df$time), max(long_df$time), length.out = 100),
+  group_label = levels(long_df$group_label)
+)
+# Make sure it’s a factor
+pred_df$group_label <- factor(pred_df$group_label, levels = levels(long_df$group_label))
+
+# 2. Add the centered age and sex columns
+pred_df$ENROLL_AGE_c <- 0
+pred_df$Sex        <- factor("Female", levels = levels(long_df$Sex))
+#str(pred_df)
+
+# 4. Predict the marginal fit
+pred_df$fit <- predict(m_reml, newdata = pred_df, re.form = NA)
+
+
+# 5. Plot
+
+pdf(
+  paste0(response_var ,"_Observed Data with Fitted Trajectories.pdf"),6,6
+)
+
+ggplot(long_df, aes(x = time, y = !!sym(response_var), color = group_label)) +
+  geom_point(alpha = 0.3, size = 1) +
   
-  fml <- as.formula(
-    paste0(
-      response_var,
-      " ~ 1 + group_label + time + group_label:time +   (1  + time | PATNO)"      # envolved.age_c +       + time
+  # 2. group mean at each time (line)
+  #  stat_summary(
+  #    aes(group = group_label, color = group_label),
+  #    fun    = mean,
+  #    geom   = "line",
+  #    size   = 0.5
+  #  )
+  
+  # 3. fitted marginal trajectories
+  geom_line(
+    data = pred_df,
+    aes(x = time, y = fit, group = group_label),
+    size = 1
+  ) +
+  
+  geom_line(data = pred_df, aes(y = fit), size = 1) +
+  labs(
+    x = "Time",
+    y = response_var,
+    title = "Observed Data with Fitted Trajectories"
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      HC        = "black",    # or whatever palette you like
+      PD_LRRK2  = "red"
     )
+  ) +
+  theme_minimal()
+dev.off()
+
+###Diagnostic Plots for Model Checking
+#Residuals vs. Fitted and Q–Q Plots.  Purpose: Check homoscedasticity, linearity, and normality of residuals.
+
+pdf(
+  paste0(response_var ,"_residuals vs. fitted.pdf"),6,6
+)
+plot(m_reml)            # base R in lmer: residuals vs. fitted
+dev.off()
+
+
+pdf(
+  paste0(response_var ,"_lattice Q–Q for random effects.pdf"),6,6
+)
+qqmath(ranef(m_reml))   # lattice Q–Q for random effects
+dev.off()
+
+
+pdf(
+  paste0(response_var ,"_group_label_time_CIs.pdf"),6,6
+)
+
+ggpredict(m_reml, c("time", "group_label")) %>% plot()
+dev.off()
+
+pdf(
+  paste0(response_var ,"_seperate_group_label_time_CIs.pdf"),6,6
+)
+
+plot(effect("group_label:time", m_reml))
+dev.off()
+
+
+pdf(
+  paste0("The protein plot of", response_var ,".pdf"),6,6
+)
+
+#Trajectory (“Spaghetti”) Plots of Individual Proteins
+prot <- response_var
+df <- long_df %>%
+  select(PATNO, time, group_label, value = all_of(prot))
+
+ggplot(df, aes(x = time, y = value, group = PATNO, color = group_label)) +
+  # thin, transparent lines for each subject
+  geom_line(alpha = 0.3) +
+  #ylim(16,21) +
+  
+  # thick lines for the group means, inheriting the same colour mapping
+  stat_summary(
+    aes(group = group_label, color = group_label), 
+    fun    = mean, 
+    geom   = "line", 
+    size   = 0.5
+  ) +
+  
+  scale_color_manual(
+    values = c(
+      HC        = "black",    # or whatever palette you like
+      PD_LRRK2  = "red"
+    )
+  ) +
+  
+  labs(
+    title    = paste("Time Course of", prot),
+    x        = "Time",
+    y        = "Log₂(abundance)",
+    color    = "Group"
+  ) +
+  theme_minimal()
+
+dev.off()
+
+
+
+#plot a set of protiens
+library(lme4)
+library(dplyr)
+library(ggplot2)
+library(ggeffects)
+library(lattice)
+
+long_df$group_label <- factor(long_df$group_label)
+protein_names <- c("CTSD","ORM2","LYZ","SERPING1",
+                   "CTSB","CTSL","CTSF","CTSZ")
+
+for (protein_name in protein_names) {
+  
+  response_var <- paste0("P177_CSF_", protein_name)
+  
+  ## 1 ── fit model ─────────────────────────────────────────────
+  fml <- as.formula(
+    paste0(response_var,
+           " ~ 1 + group_label + time + Sex + group_label:time +  
+    time:Sex + group_label:Sex + group_label:time:Sex + ENROLL_AGE_c + (1+time|PATNO)")
   )
   
-  m_mixed <- mixed(
-    formula = fml,
-    data    = long_df,
-    control = lmerControl(optimizer = "bobyqa"),
-    method  = "LRT"
-  )
+  m_reml <- lmer(fml, data = long_df,
+                 control = lmerControl(optimizer = "bobyqa"))
   
-  capture.output(
-    m_mixed,
-    file = paste0(response_var, "_fix_effect_significance_test_by_mix.txt")
-  )
-  
-  m_reml <- lmer(
-    formula = fml,
-    data    = long_df,
-    control = lmerControl(optimizer = "bobyqa")
-  )
-  
-  capture.output(
-    summary(m_reml),
-    file = paste0(response_var, " _lmer_full_summary.txt")
-  )
-  
-  # 3. Build a prediction grid (marginal: fixed effects only)
+  ## 2 ── build prediction grid ────────────────────────────────
   pred_df <- expand.grid(
     time        = seq(min(long_df$time), max(long_df$time), length.out = 100),
     group_label = levels(long_df$group_label)
-  )
-  pred_df$group_label   <- factor(pred_df$group_label, levels = levels(long_df$group_label))
-  pred_df$envolved.age_c <- 0
-  
-  # 4. Predict marginal fit + 95% CI for fixed effects
-  pred_df$fit <- predict(m_reml, newdata = pred_df, re.form = NA)
-  
-  X   <- model.matrix(~ 1 + group_label + time + group_label:time , data = pred_df)
-  V   <- vcov(m_reml)                       # Var-cov of fixed effects
-  se  <- sqrt(diag(X %*% V %*% t(X)))       # SE for each row's linear predictor
-  
-  pred_df$lo <- pred_df$fit - 1.96 * se
-  pred_df$hi <- pred_df$fit + 1.96 * se
-  
-  # 5. (Optional) tidy fixed effects for slopes/p-values used in annotations
-  tidy_fix <- broom::tidy(m_reml, effects = "fixed")
-  slope_hc <- tidy_fix  %>% filter(term == "time") %>% pull(estimate)
-  p_hc     <- tidy_fix  %>% filter(term == "time") %>% pull(p.value)
-  
-  b_int    <- tidy_fix  %>% filter(term == "group_labelPD_LRRK2:time") %>% pull(estimate)
-  p_int    <- tidy_fix  %>% filter(term == "group_labelPD_LRRK2:time") %>% pull(p.value)
-  
-  slope_pd <- slope_hc + b_int
-  p_pd     <- p_int
-  
-  yrange   <- range(long_df[[response_var]], na.rm = TRUE)
-  xpos     <- max(long_df$time) * 0.7
-  annot_df <- tibble(
-    group_label = c("HC", "PD_LRRK2"),
-    x           = xpos,
-    y           = c(yrange[2]*0.9, yrange[2]*0.8),
-    label       = c(
-      sprintf("slope=%.3f\np=%.3g",  slope_hc, p_hc),
-      sprintf("slope=%.3f\np=%.3g",  slope_pd, p_pd)
+  ) |>
+    mutate(
+      ENROLL_AGE_c = 0,
+      Sex          = factor("Female", levels = levels(long_df$Sex)),
+      fit          = predict(m_reml, newdata = cur_data(), re.form = NA)
     )
-  )
   
-  # 6. Plot
-  pdf(paste0(response_var, "_ObservedData_Fit_connecting.pdf"), 5, 3)
+  ## 3 ── observed vs fitted plot ──────────────────────────────
+  pdf(paste0(response_var, "_ObservedData_Fit.pdf"), 6, 6)
   tryCatch({
-    y_rng    <- range(long_df[[response_var]], na.rm = TRUE)
-    y_min    <- floor(y_rng[1])
-    y_max    <- ceiling(y_rng[2])
-    y_breaks <- seq(y_min, y_max, by = 1)
-    
-    p <- ggplot(long_df, aes(time, !!sym(response_var), colour = group_label)) +
-      geom_point(alpha = 0.3, size = 0.2) +
-      
-      # 95% CI ribbons per group (marginal fits)
-      geom_ribbon(
-        data = pred_df,
-        aes(x = time, ymin = lo, ymax = hi, fill = group_label),
-        alpha = 0.18,
-        inherit.aes = FALSE
+    p <- ggplot(long_df,
+                aes(time, !!sym(response_var), colour = group_label)) +
+      geom_point(alpha = .3, size = 1) +
+      # 2. group mean at each time (line)
+      stat_summary(
+        aes(group = group_label, color = group_label),
+        fun    = mean,
+        geom   = "line",
+        size   = 0.5
       ) +
-      geom_line(
-        data = pred_df,
-        aes(time, fit, colour = group_label, group = group_label),
-        size = 1
-      ) +
-      
-      geom_line(aes(group = PATNO), alpha = 0.25, size = 0.3)+
-      
-      # optional: add text annotations for slopes/p-values
-      # geom_text(
-      #   data = annot_df,
-      #   aes(x = x, y = y, label = label, color = group_label),
-      #   hjust = 0, vjust = -0.5, size = 3.5, show.legend = FALSE
-      # ) +
-      
+      geom_line(data = pred_df,
+                aes(time, fit, colour = group_label, group = group_label),
+                size = 1) +
       scale_color_manual(values = c(HC = "black", PD_LRRK2 = "red")) +
-      scale_fill_manual(values  = c(HC = "black", PD_LRRK2 = "red")) +
-      
-      scale_y_continuous(breaks = y_breaks, limits = c(y_min, y_max)) +
       labs(
-        x     = "Years",
+        x     = "Time",
         y     = response_var,
-        title = "Observed Data and Estimated Slopes",
-        color = "group",
-        fill  = "group"
+        title = "Observed Data with Group Means and Fitted Trajectories",
+        color = "Group"
       ) +
-      
-      # Clean look: no grid/background
-      theme_classic() +
-      theme(
-        axis.text    = element_text(color = "black", size = 18),
-        axis.title   = element_text(color = "black", size = 18),
-        legend.title = element_text(color = "black", size = 18),
-        legend.text  = element_text(color = "black", size = 18)
-      )
-    
-    print(p)
+      theme_minimal()
+    print(p)                      # <- required inside pdf()
+  }, finally = dev.off())
+  
+  ## 4 ── residuals vs fitted ──────────────────────────────────
+  ## residuals vs fitted
+  pdf(paste0(response_var, "_Residuals_vs_Fitted.pdf"), 6, 6)
+  tryCatch({
+    print( plot(m_reml) )            # <- explicit print
+  }, finally = dev.off())
+  
+  ## 5 ── QQ plot of random effects ────────────────────────────
+  pdf(paste0(response_var, "_QQ_RandomEffects.pdf"), 6, 6)
+  tryCatch({
+    print( qqmath(ranef(m_reml)) )   # <- explicit print
+  }, finally = dev.off())
+  
+  ## 6 ── ggpredict ribbon (ggsave auto-closes device) ─────────
+  p_ci <- ggpredict(m_reml, c("time", "group_label")) |> plot()
+  ggsave(paste0(response_var, "_group_time_CIs.pdf"),
+         plot = p_ci, width = 6, height = 6)
+  
+  ## 7 ── spaghetti + group means ──────────────────────────────
+  df_plot <- long_df |>
+    select(PATNO, time, group_label, value = all_of(response_var))
+  
+  pdf(paste0(response_var, "_Spaghetti.pdf"), 6, 6)
+  tryCatch({
+    p2 <- ggplot(df_plot,
+                 aes(time, value, group = PATNO, colour = group_label)) +
+      geom_line(alpha = .25) +
+      stat_summary(aes(group = group_label, colour = group_label),
+                   fun = mean, geom = "line", size = 1.2) +
+      scale_color_manual(values = c(HC = "black", PD_LRRK2 = "red")) +
+      theme_minimal()
+    print(p2)
   }, finally = dev.off())
 }
-
